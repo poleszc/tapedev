@@ -1,0 +1,3 @@
+obj-m := tapedev.o
+
+ccflags-y := -Wall
