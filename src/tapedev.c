@@ -1,8 +1,13 @@
-#include <linux/genhd.h>
+#include <linux/blkdev.h>
+#include <linux/dma-mapping.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/module.h>
+#include <linux/mutex.h>
 #include <linux/pci.h>
+#include <linux/slab.h>
+#include <linux/spinlock.h>
+#include <linux/wait.h>
 
 #include "tapedev.h"
 
@@ -15,9 +20,6 @@
 #endif
 
 #define TAPEDEV_NAME "tapedev"
-#define TAPEDEV_MAJOR 240
-#define TAPEDEV_MINOR 1
-
 #define TAPEDEV_MAX_DEVICES 256
 #define TAPEDEV_MAX_SECTIONS 8
 
@@ -31,6 +33,8 @@ MODULE_AUTHOR("poleszc");
 // =================== DEVICE STUCTURES ===================
 // pci_dev (PCI card) -> tapedev_device (out device) ->
 // tapedev_section[N] (single section in the device)
+
+struct tapedev_device; // FD
 
 /**
  * @brief Represents a single tapedev section.
@@ -65,7 +69,7 @@ struct tapedev_section {
   dma_addr_t pgtable_dma;
 };
 
-static struct tapedev_device {
+struct tapedev_device {
   /// PCI object handling this device.
   struct pci_dev *pdev;
   /// Index of this device. X in `/dev/tapedevX`
@@ -94,6 +98,7 @@ static DEFINE_MUTEX(tapedev_devices_lock);
 static int tapedev_major;
 
 // =================== HARDWARE HANDLING ===================
+#define BIT(OFFSET) (1u << (OFFSET))
 #define TDEV_IOR(TAPE_DEV, REG) ioread32(TAPE_DEV->bar + REG)
 #define TDEV_IOW(TAPE_DEV, REG, VAL) iowrite32(VAL, TAPE_DEV->bar + REG)
 /// Sections are stored under (id+1)*0x100 since HW starts numbering from 1.
@@ -103,9 +108,6 @@ static int tapedev_major;
 #define TDEV_SECTION_IOW(TAPE_DEV, SECT_ID, REG, VAL)                          \
   TDEV_IOW(TAPE_DEV, TDEV_SECTION_OFFSET(SECT_ID, REG), VAL)
 #define TDEV_SECTION_SIZE(TAPE_TYPE) ((32ULL) * BIT(TAPE_TYPE) * 8192u)
-#define TDEV_BLOCK_SIZE(TAPE_TYPE) (BIT(TAPE_TYPE) * 512u)
-
-#define BIT(OFFSET) (1u << (OFFSET))
 
 // =================== INTERRUPTS ===================
 static irqreturn_t tapedev_isr(int irg, void *opaque) {
@@ -120,13 +122,13 @@ static irqreturn_t tapedev_isr(int irg, void *opaque) {
   // Check what caused the interrupt.
   istatus = TDEV_IOR(dev, TAPEDEV_IRQ_STATUS_ADDR);
   if (!istatus) {
-    spin_lock_irqrestore(&dev->slock, flags);
-    return IRG_NONE;
+    spin_unlock_irqrestore(&dev->slock, flags);
+    return IRQ_NONE;
   }
 
   // Init done - device has finished initing. Wake up someone waiting in
   // tapedev_enable_hw().
-  if (status & BIT(TAPEDEV_IRQ_INIT_DONE)) {
+  if (istatus & BIT(TAPEDEV_IRQ_INIT_DONE)) {
     DEBUG("ISR Done\n");
     dev->init_done = true;
     wake_up(&dev->init_wq);
@@ -134,7 +136,7 @@ static irqreturn_t tapedev_isr(int irg, void *opaque) {
   }
 
   // Hardware error.
-  if (status & BIT(TAPEDEV_IRQ_HW_ERROR)) {
+  if (istatus & BIT(TAPEDEV_IRQ_HW_ERROR)) {
     DEBUG("ISR Error\n");
     dev_err(&dev->pdev->dev, "hardware error from device\n");
     handled |= BIT(TAPEDEV_IRQ_HW_ERROR);
@@ -142,8 +144,8 @@ static irqreturn_t tapedev_isr(int irg, void *opaque) {
 
   // Check done/error for each section.
   for (i = 0; i < dev->section_count; i++) {
-    if (status & (BIT(TAPEDEV_IRQ_SECT_0_DONE + i) |
-                  BIT(TAPEDEV_IRQ_SECT_0_ERROR + i))) {
+    if (istatus & (BIT(TAPEDEV_IRQ_SECT_0_DONE + i) |
+                   BIT(TAPEDEV_IRQ_SECT_0_ERROR + i))) {
       DEBUG("ISR Section\n");
       struct tapedev_section *sec = &dev->sections[i];
 
@@ -160,12 +162,46 @@ static irqreturn_t tapedev_isr(int irg, void *opaque) {
   // Clear the bits we have handled.
   TDEV_IOW(dev, TAPEDEV_IRQ_CLEAR_ADDR, handled);
 
-  spin_lock_irqsave(&dev->slock, flags);
-  return IRQ_RETVAL(istatus);
+  spin_unlock_irqrestore(&dev->slock, flags);
+  return IRQ_HANDLED;
 }
 
 // =================== STARTING THE DEVICE ===================
-// TODOP
+static int tapedev_enable_hw(struct tapedev_device *dev) {
+  u32 mask;
+  int i;
+
+  // Clear all interrupts.
+  TDEV_IOW(dev, TAPEDEV_IRQ_CLEAR_ADDR, ~0u);
+
+  // Enable TAPEDEV_IRQ_INIT_DONE and TAPEDEV_IRQ_HW_ERROR.
+  mask = ~(BIT(TAPEDEV_IRQ_INIT_DONE) | BIT(TAPEDEV_IRQ_HW_ERROR));
+  TDEV_IOW(dev, TAPEDEV_IRQ_MASK_ADDR, mask);
+
+  dev->init_done = false;
+
+  // Do the thing.
+  TDEV_IOW(dev, TAPEDEV_ENABLE_ADDR, 1);
+
+  // Wait for the interrupt.
+  if (!wait_event_timeout(dev->init_wq, dev->init_done, 5 * HZ)) {
+    DEBUG("Init timeout\n");
+    return -ETIMEDOUT;
+  }
+
+  dev->section_count = TDEV_IOR(dev, TAPEDEV_SECTIONS_ADDR);
+  if (dev->section_count == 0 || dev->section_count > TAPEDEV_MAX_SECTIONS) {
+    DEBUG("Invalid section count\n");
+    return -EIO; // TODOP: Is tha so?
+  }
+
+  for (i = 0; i < dev->section_count; i++) {
+    mask &= ~BIT(TAPEDEV_IRQ_SECT_0_DONE + i);
+    mask &= ~BIT(TAPEDEV_IRQ_SECT_0_ERROR + i);
+  }
+  TDEV_IOW(dev, TAPEDEV_IRQ_MASK_ADDR, mask);
+  return 0;
+}
 
 // =================== SECTION INIT & DEINIT ===================
 static int tapedev_init_section(struct tapedev_device *dev, int i) {
@@ -180,16 +216,18 @@ static int tapedev_init_section(struct tapedev_device *dev, int i) {
   sec->tapes_count = TDEV_SECTION_IOR(dev, i, TAPEDEV_SECT_TAPES_ADDR);
   sec->tape_type = TDEV_SECTION_IOR(dev, i, TAPEDEV_SECT_TAPE_SIZE_ADDR);
   sec->tape_size = TDEV_SECTION_SIZE(sec->tape_type);
-  sec->block_size = TDEV_BLOCK_SIZE(sec->tape_type);
-  TDEV_SECTION_IOW(dev, i, TAPEDEV_SECT_TAPE_BLOCKSIZE_ADDR, sec->block_size);
+  // TODOP: Make this configurable.
+  sec->block_size = 4096;
+  TDEV_SECTION_IOW(dev, i, TAPEDEV_SECT_TAPE_BLOCKSIZE_ADDR,
+                   TAPEDEV_SECT_BLOCKSIZE_4096);
 
   sec->pgtable = dma_alloc_coherent(&dev->pdev->dev, TAPEDEV_BUF_PGTABLE_SIZE,
-                                    &sec->pgtable_dma, GPF_KERNEL);
+                                    &sec->pgtable_dma, GFP_KERNEL);
   if (!sec->pgtable)
     return -ENOMEM;
   // TODOP: Change to debug.
   dev_info(&dev->pdev->dev, "section %d: %u tapes, type %u, %llu B per tape\n",
-           i, s->n_tapes, s->tape_type, s->tape_size);
+           i, sec->tapes_count, sec->tape_type, sec->tape_size);
   return 0;
 }
 
@@ -202,66 +240,52 @@ static void tapedev_free_section(struct tapedev_device *dev, int i) {
   }
 }
 
-struct tapedev_device_operations {
-  int (*open)(struct block_device *, fmode_t);
-  int (*release)(struct gendisk *, fmode_t);
-  int (*locked_ioctl)(struct block_device *, fmode_t, unsigned, unsigned long);
-  int (*ioctl)(struct block_device *, fmode_t, unsigned, unsigned long);
-  int (*compat_ioctl)(struct block_device *, fmode_t, unsigned, unsigned long);
-  int (*direct_access)(struct block_device *, sector_t, void **,
-                       unsigned long *);
-  int (*media_changed)(struct gendisk *);
-  int (*revalidate_disk)(struct gendisk *);
-  int (*getgeo)(struct block_device *, struct hd_geometry *);
-  blk_qc_t (*submit_bio)(struct bio *bio);
-  struct module *owner;
-}
+// =================== BLOCK DEVICE ===================
+// static int tapedev_open(struct block_device *bdev, fmode_t mode) {
+//   // TODOP: Implement
+//   return 0;
+// }
 
-static int
-tapedev_open(struct block_device *bdev, fmode_t mode) {
-  // TODOP: Implement
-  return 0;
-}
+// static int tapedev_release(struct gendisk *gd, fmode_t mode) {
+//   // TODOP: Implement
+//   return 0;
+// }
 
-static int tapedev_release(struct gendisk *gd, fmode_t mode) {
-  // TODOP: Implement
-  return 0;
-}
+// static const struct block_device_operations tapedev_ops = {
+//     .owner = THIS_MODULE,
+//     .open = tapedev_open,
+//     .release = tapedev_release,
+//     // .ioctl = tapedev_ioclt,
+// };
 
-struct block_device_operations tapedev_ops = {
-    .owner = THIS_MODULE,
-    .open = tapedev_open,
-    .release = tapedev_release,
-};
+// static int create_block_device(struct tapedev_device *dev) {
 
-static int create_block_device(struct tapedev_device *dev) {
+//   // Initialize the gendisk structure.
+//   dev->gd = alloc_disk(TAPEDEV_MINOR);
+//   if (!dev->gd) {
+//     printk(KERN_NOTICE "alloc_disk failure");
+//     return -ENOMEM;
+//   }
 
-  // Initialize the gendisk structure.
-  dev->gd = alloc_disk(TAPEDEV_MINOR);
-  if (!dev->gd) {
-    printk(KERN_NOTICE "alloc_disk failure");
-    return -ENOMEM;
-  }
+//   // Fill out the gendisk fields.
+//   dev->gd->major = TAPEDEV_MAJOR;
+//   dev->gd->first_minor = TAPEDEV_MINOR;
+//   dev->gd->fops = &tapedev_ops;
+//   dev->gd->queue = dev->queue;
+//   dev->gd->private_data = dev;
+//   snprintf(dev->gd->disk_name, 32, "tapedev");
+//   set_capacity(dev->gd, NR_SECTORS);
 
-  // Fill out the gendisk fields.
-  dev->gd->major = TAPEDEV_MAJOR;
-  dev->gd->first_minor = TAPEDEV_MINOR;
-  dev->gd->gops = &tapedev_ops;
-  dev->gd->queue = dev->queue;
-  dev->gd->private_data = dev;
-  snprintf(dev->gd->disk_name, 32, "tapedev");
-  set_capacity(dev->gd, NR_SECTORS);
+//   // TODOP: Implement.
+//   add_disk(dev->gd);
+//   return 0;
+// }
 
-  // TODOP: Implement.
-  add_disk(dev->gd);
-  return 0;
-}
-
-static int delete_block_device(struct tapedev_device *dev) {
-  if (dev->gd)
-    del_gendisk(dev->gd);
-  // TODOP: Implement
-}
+// static int delete_block_device(struct tapedev_device *dev) {
+//   if (dev->gd)
+//     del_gendisk(dev->gd);
+//   // TODOP: Implement
+// }
 
 // =================== PCI DRIVER ===================
 
@@ -319,7 +343,7 @@ static int tapedev_probe(struct pci_dev *pdev,
 
   // Connect the IRQ line.
   if ((err =
-           request_irq(pdev->irq, adlerdev_isr, IRQF_SHARED, "adlerdev", dev)))
+           request_irq(pdev->irq, tapedev_isr, IRQF_SHARED, TAPEDEV_NAME, dev)))
     goto out_irq;
 
   // Turn on the device and wait for INIT_DONE.
@@ -327,7 +351,7 @@ static int tapedev_probe(struct pci_dev *pdev,
     goto out_enable_hw;
 
   // Initialize each section.
-  for (i = 0; i < dev->n_sections; i++) {
+  for (i = 0; i < dev->section_count; i++) {
     if ((err = tapedev_init_section(dev, i))) {
       // Free all sections registered up to this point when an error occurs.
       while (--i >= 0)
@@ -338,7 +362,7 @@ static int tapedev_probe(struct pci_dev *pdev,
 
   // TODOP: Change to DEBUG;
   dev_info(&pdev->dev, "tapedev%d ready, %u sections\n", dev->idx,
-           dev->n_sections);
+           dev->section_count);
   return 0;
 
 out_sections:
@@ -404,7 +428,7 @@ static struct pci_driver tapedev_pci_driver = {
 };
 
 // =================== MODULE INIT & EXIT ===================
-static void tapedev_init(void) {
+static int tapedev_init(void) {
   int err;
 
   // When passing 0, `register_blkdev()` will assign us the major.
@@ -418,17 +442,14 @@ static void tapedev_init(void) {
   if ((err = pci_register_driver(&tapedev_pci_driver))) {
     unregister_blkdev(tapedev_major, TAPEDEV_NAME);
     DEBUG("Unable to register PCI driver");
-    return err
+    return err;
   }
-
-  create_block_device(&dev);
   return 0;
 }
 
 static void tapedev_exit(void) {
   pci_unregister_driver(&tapedev_pci_driver);
-  delete_block_device(&dev);
-  unregister_blkdev(TAPEDEV_MAJOR, TAPEDEV_NAME);
+  unregister_blkdev(tapedev_major, TAPEDEV_NAME);
   return;
 }
 
