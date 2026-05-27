@@ -9,6 +9,9 @@
 #include <linux/spinlock.h>
 #include <linux/wait.h>
 
+#include "asm-generic/errno-base.h"
+#include "asm-generic/errno.h"
+#include "linux/device.h"
 #include "tapedev.h"
 
 #define DEBUG_ON
@@ -288,6 +291,130 @@ static void tapedev_free_section(struct tapedev_device *dev, int i) {
 //     del_gendisk(dev->gd);
 //   // TODOP: Implement
 // }
+//
+
+// =================== COMMANDS ===================
+static const char *tapedev_status_name(u32 status) {
+  switch (status) {
+  case TAPEDEV_SECT_STATUS_IDLE:
+    return "IDLE";
+  case TAPEDEV_SECT_STATUS_WORKING:
+    return "WORKING";
+  case TAPEDEV_SECT_STATUS_DONE:
+    return "DONE";
+  case TAPEDEV_SECT_STATUS_ERR_INVALID_CMD:
+    return "CMD";
+  case TAPEDEV_SECT_STATUS_ERR_TAPE_ACTIVE:
+    return "ACTIVE";
+  case TAPEDEV_SECT_STATUS_ERR_NO_TAPE:
+    return "TAPE";
+  case TAPEDEV_SECT_STATUS_ERR_RESET:
+    return "RESET";
+  case TAPEDEV_SECT_STATUS_ERR_INVALID_TAPE_NO:
+    return "NO";
+  case TAPEDEV_SECT_STATUS_ERR_INVALID_FFWD_POS:
+    return "POS";
+  case TAPEDEV_SECT_STATUS_ERR_READ_PAST_END:
+    return "END";
+  case TAPEDEV_SECT_STATUS_ERR_WRITE_PAST_END:
+    return "END";
+  case TAPEDEV_SECT_STATUS_ERR_IO:
+    return "IO";
+  case TAPEDEV_SECT_STATUS_ERR_PGTABLE:
+    return "PGTABLE";
+  default:
+    return "UNKNOWN";
+  }
+}
+
+/**
+ * @brief Maps the device status to a correct errno.
+ */
+static int tapedev_status_to_errno(u32 status) {
+  switch (status) {
+  case TAPEDEV_SECT_STATUS_DONE:
+    return 0;
+  case TAPEDEV_SECT_STATUS_ERR_TAPE_ACTIVE:
+    return -EBUSY;
+  case TAPEDEV_SECT_STATUS_ERR_NO_TAPE:
+    return -ENOMEDIUM;
+  case TAPEDEV_SECT_STATUS_ERR_INVALID_TAPE_NO:
+  case TAPEDEV_SECT_STATUS_ERR_INVALID_FFWD_POS:
+  case TAPEDEV_SECT_STATUS_ERR_INVALID_CMD:
+    return -EINVAL;
+  case TAPEDEV_SECT_STATUS_ERR_READ_PAST_END:
+  case TAPEDEV_SECT_STATUS_ERR_WRITE_PAST_END:
+    return -ENOSPC;
+  case TAPEDEV_SECT_STATUS_ERR_PGTABLE:
+    return -EFAULT;
+  case TAPEDEV_SECT_STATUS_ERR_IO:
+  case TAPEDEV_SECT_STATUS_ERR_RESET:
+  default:
+    return -EIO;
+  }
+}
+
+static int tapedev_send_cmd(struct tapedev_section *sec, u32 cmd) {
+  struct tapedev_device *dev = sec->device;
+  unsigned long flags;
+  int ret;
+  u32 status;
+
+  // One command per section according to the task description.
+  mutex_lock(&sec->cmd_mutex);
+
+  // Set the command to not done under spin lock ao it doesn't race with the
+  // interrupt.
+  spin_lock_irqsave(&dev->slock, flags);
+  sec->cmd_done = false;
+  spin_unlock_irqrestore(&dev->slock, flags);
+
+  DEBUG("send_cmd sec=%d cmd=0x%08x\n", sec->id, cmd);
+
+  // Send the command to the device.
+  TDEV_SECTION_IOW(dev, sec->id, TAPEDEV_SECT_CMD_ADDR, cmd);
+
+  // Wait for completion of the command.
+  ret = wait_event_timeout(sec->cmd_wq, sec->cmd_done, 5 * HZ);
+  if (ret == 0) {
+    DEBUG("send_cmd sec=%d TIMEOUT\n", sec->id);
+    mutex_unlock(&sec->cmd_mutex);
+    return -ETIMEDOUT;
+  }
+
+  // Read the command status.
+  spin_lock_irqsave(&dev->slock, flags);
+  status = sec->cmd_status;
+  spin_unlock_irqrestore(&dev->slock, flags);
+
+  DEBUG("send_cmd sec=%d statuc=0x%02x (%s)\n", sec->id, status,
+        tapedev_status_name(status));
+  mutex_unlock(&sec->cmd_mutex);
+  return tapedev_status_to_errno(status);
+}
+
+static int tapedev_take_tape(struct tapedev_section *sec, u32 tape_number) {
+  return tapedev_send_cmd(sec, TAPEDEV_CMD_TAKE_TAPE | (tape_number << 8));
+}
+static int tapedev_eject_tape(struct tapedev_section *sec) {
+  return tapedev_send_cmd(sec, TAPEDEV_CMD_EJECT_TAPE);
+}
+static int tapedev_rewind(struct tapedev_section *sec) {
+  return tapedev_send_cmd(sec, TAPEDEV_CMD_REWIND);
+}
+static int tapedev_fast_fwd(struct tapedev_section *sec, u32 block_count) {
+  return tapedev_send_cmd(sec, TAPEDEV_CMD_FAST_FWD | (block_count << 8));
+}
+static int tapedev_read(struct tapedev_section *sec, u32 block_count,
+                        u32 offset) {
+  return tapedev_send_cmd(sec, TAPEDEV_CMD_READ | (block_count << 8) |
+                                   (offset << 23));
+}
+static int tapedev_write(struct tapedev_section *sec, u32 block_count,
+                         u32 offset) {
+  return tapedev_send_cmd(sec, TAPEDEV_CMD_WRITE | (block_count << 8) |
+                                   (offset << 23));
+}
 
 // =================== PCI DRIVER ===================
 
