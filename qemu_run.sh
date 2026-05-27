@@ -1,0 +1,15 @@
+~/code/zad3-public/build/qemu-system-x86_64 \
+    -enable-kvm -cpu host -smp 22 -m 4G \
+    -device virtio-balloon \
+    -net nic,model=virtio -net user,hostfwd=tcp::2222-:22 \
+    -device virtio-scsi-pci,id=scsi0 \
+    -drive file=zso2026_cow.qcow2,if=none,id=drive0 \
+    -device scsi-hd,bus=scsi0.0,drive=drive0 \
+    -fsdev local,id=hshare,path=hshare/,security_model=none \
+    -device virtio-9p-pci,fsdev=hshare,mount_tag=hshare \
+    -chardev stdio,id=cons,signal=off \
+    -device virtio-serial-pci \
+    -device virtconsole,chardev=cons \
+    -display none \
+    -device '{"driver":"tapedev","data_dir":"data","tape_types":[0,1,2,3,4],"tapes":[50,40,30,20,10]}' \
+    -qmp tcp:localhost:4444,server,wait=off

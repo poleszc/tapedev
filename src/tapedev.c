@@ -14,9 +14,9 @@
 #define DEBUG_ON
 
 #ifdef DEBUG_ON
-#define DEBUG(TEXT) printk(KERN_ALERT "[TAPEDEV]: " TEXT);
+#define DEBUG(fmt, ...) printk(KERN_ALERT "[TAPEDEV]: " fmt, ##__VA_ARGS__)
 #else
-#define DEBUG(TEXT)
+#define DEBUG(fmt, ...)
 #endif
 
 #define TAPEDEV_NAME "tapedev"
@@ -392,6 +392,7 @@ out_alloc:
 }
 
 static void tapedev_remove(struct pci_dev *pdev) {
+  DEBUG("tapedev_remove\n");
   // Strongly inspired by `adlerdev_remove`.
   struct tapedev_device *dev = pci_get_drvdata(pdev);
   int i;
