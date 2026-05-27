@@ -1,4 +1,4 @@
-KDIR ?= /home/plates/apps/src/linux
+KDIR ?= /home/zso/linux/
 
 default:
 	$(MAKE) -C $(KDIR) M=$$PWD

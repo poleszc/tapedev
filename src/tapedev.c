@@ -20,6 +20,9 @@
 #endif
 
 #define TAPEDEV_NAME "tapedev"
+#ifndef KBUILD_MODNAME // TODOP: IS that needed?
+#define KBUILD_MODNAME TAPEDEV_NAME
+#endif
 #define TAPEDEV_MAX_DEVICES 256
 #define TAPEDEV_MAX_SECTIONS 8
 
@@ -98,7 +101,6 @@ static DEFINE_MUTEX(tapedev_devices_lock);
 static int tapedev_major;
 
 // =================== HARDWARE HANDLING ===================
-#define BIT(OFFSET) (1u << (OFFSET))
 #define TDEV_IOR(TAPE_DEV, REG) ioread32(TAPE_DEV->bar + REG)
 #define TDEV_IOW(TAPE_DEV, REG, VAL) iowrite32(VAL, TAPE_DEV->bar + REG)
 /// Sections are stored under (id+1)*0x100 since HW starts numbering from 1.
@@ -175,7 +177,7 @@ static int tapedev_enable_hw(struct tapedev_device *dev) {
   TDEV_IOW(dev, TAPEDEV_IRQ_CLEAR_ADDR, ~0u);
 
   // Enable TAPEDEV_IRQ_INIT_DONE and TAPEDEV_IRQ_HW_ERROR.
-  mask = ~(BIT(TAPEDEV_IRQ_INIT_DONE) | BIT(TAPEDEV_IRQ_HW_ERROR));
+  mask = ~((u32)BIT(TAPEDEV_IRQ_INIT_DONE) | (u32)BIT(TAPEDEV_IRQ_HW_ERROR));
   TDEV_IOW(dev, TAPEDEV_IRQ_MASK_ADDR, mask);
 
   dev->init_done = false;
@@ -196,8 +198,8 @@ static int tapedev_enable_hw(struct tapedev_device *dev) {
   }
 
   for (i = 0; i < dev->section_count; i++) {
-    mask &= ~BIT(TAPEDEV_IRQ_SECT_0_DONE + i);
-    mask &= ~BIT(TAPEDEV_IRQ_SECT_0_ERROR + i);
+    mask &= ~((u32)BIT(TAPEDEV_IRQ_SECT_0_DONE + i));
+    mask &= ~((u32)BIT(TAPEDEV_IRQ_SECT_0_ERROR + i));
   }
   TDEV_IOW(dev, TAPEDEV_IRQ_MASK_ADDR, mask);
   return 0;

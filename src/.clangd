@@ -1,0 +1,22 @@
+CompileFlags:
+  Add:
+    - -I../../linux/include
+    - -I../../linux/arch/x86/include
+    - -I../../linux/arch/x86/include/generated
+    - -I../../linux/include/generated/uapi
+    - -I../../linux/arch/x86/include/generated/uapi
+    - -I../../linux/include/uapi
+    - -I../../linux/arch/x86/include/uapi
+
+    - -D__KERNEL__
+    - -DMODULE
+    - -DCONFIG_64BIT
+
+    - -DCONFIG_X86_64
+
+    - -DCC_HAVE_ASM_GOTO
+    - -include ../../linux/include/linux/kconfig.h
+
+  Remove:
+    - -m*
+    - -f*
