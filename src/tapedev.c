@@ -11,6 +11,7 @@
 
 #include "asm-generic/errno-base.h"
 #include "asm-generic/errno.h"
+#include "linux/byteorder/generic.h"
 #include "linux/device.h"
 #include "tapedev.h"
 
@@ -113,6 +114,35 @@ static int tapedev_major;
 #define TDEV_SECTION_IOW(TAPE_DEV, SECT_ID, REG, VAL)                          \
   TDEV_IOW(TAPE_DEV, TDEV_SECTION_OFFSET(SECT_ID, REG), VAL)
 #define TDEV_SECTION_SIZE(TAPE_TYPE) ((32ULL) * BIT(TAPE_TYPE) * 8192u)
+
+/**
+ * @brief Fill one page table entry
+ * @p sec section
+ * @p idx entry index (0...511)
+ * @p addr DMA address if the buffer (512B-aligned)
+ * @p block_count block size
+ */
+static void fill_pgtable_entry(struct tapedev_section *sec, int idx,
+                               dma_addr_t addr, u32 block_count) {
+  __le64 *pgt = sec->pgtable;
+  u64 entry;
+
+  WARN_ON(addr & 0x1ff);
+
+  entry = ((u64)(addr >> 9) << 32) | (u64)block_count;
+  pgt[idx] = cpu_to_le64(entry);
+}
+
+/**
+ * @brief Clear the pgtable entries starting from `keep_n`
+ */
+static void clear_pgtable_after(struct tapedev_section *sec, int keep_n) {
+  __le64 *pgt = sec->pgtable;
+  int i;
+
+  for (i = keep_n; i < TAPEDEV_BUF_PGTABLE_ENTRIES; i++)
+    pgt[i] = 0;
+}
 
 // =================== INTERRUPTS ===================
 static irqreturn_t tapedev_isr(int irg, void *opaque) {
@@ -354,7 +384,8 @@ static int tapedev_status_to_errno(u32 status) {
   }
 }
 
-static int tapedev_send_cmd(struct tapedev_section *sec, u32 cmd) {
+static int tapedev_send_cmd(struct tapedev_section *sec, u32 cmd,
+                            dma_addr_t buf_dma) {
   struct tapedev_device *dev = sec->device;
   unsigned long flags;
   int ret;
@@ -368,6 +399,11 @@ static int tapedev_send_cmd(struct tapedev_section *sec, u32 cmd) {
   spin_lock_irqsave(&dev->slock, flags);
   sec->cmd_done = false;
   spin_unlock_irqrestore(&dev->slock, flags);
+
+  // Set the buffer pointer if needed.
+  if (buf_dma)
+    TDEV_SECTION_IOW(dev, sec->id, TAPEDEV_SECT_BUFFER_PTR_ADDR,
+                     (u32)(buf_dma >> 9));
 
   DEBUG("send_cmd sec=%d cmd=0x%08x\n", sec->id, cmd);
 
@@ -393,27 +429,134 @@ static int tapedev_send_cmd(struct tapedev_section *sec, u32 cmd) {
   return tapedev_status_to_errno(status);
 }
 
+// =================== COMMAND WRAPPERS ===================
 static int tapedev_take_tape(struct tapedev_section *sec, u32 tape_number) {
-  return tapedev_send_cmd(sec, TAPEDEV_CMD_TAKE_TAPE | (tape_number << 8));
+  return tapedev_send_cmd(sec, TAPEDEV_CMD_TAKE_TAPE | (tape_number << 8), 0);
 }
 static int tapedev_eject_tape(struct tapedev_section *sec) {
-  return tapedev_send_cmd(sec, TAPEDEV_CMD_EJECT_TAPE);
+  return tapedev_send_cmd(sec, TAPEDEV_CMD_EJECT_TAPE, 0);
 }
 static int tapedev_rewind(struct tapedev_section *sec) {
-  return tapedev_send_cmd(sec, TAPEDEV_CMD_REWIND);
+  return tapedev_send_cmd(sec, TAPEDEV_CMD_REWIND, 0);
 }
 static int tapedev_fast_fwd(struct tapedev_section *sec, u32 block_count) {
-  return tapedev_send_cmd(sec, TAPEDEV_CMD_FAST_FWD | (block_count << 8));
+  return tapedev_send_cmd(sec, TAPEDEV_CMD_FAST_FWD | (block_count << 8), 0);
 }
 static int tapedev_read(struct tapedev_section *sec, u32 block_count,
                         u32 offset) {
-  return tapedev_send_cmd(sec, TAPEDEV_CMD_READ | (block_count << 8) |
-                                   (offset << 23));
+  u32 cmd = TAPEDEV_CMD_READ | (block_count << 8) | (offset << 23);
+  return tapedev_send_cmd(sec, cmd, sec->pgtable_dma);
 }
 static int tapedev_write(struct tapedev_section *sec, u32 block_count,
                          u32 offset) {
-  return tapedev_send_cmd(sec, TAPEDEV_CMD_WRITE | (block_count << 8) |
-                                   (offset << 23));
+  u32 cmd = TAPEDEV_CMD_WRITE | (block_count << 8) | (offset << 23);
+  return tapedev_send_cmd(sec, cmd, sec->pgtable_dma);
+}
+
+// TODOP: Remove. Just for test.
+static void tapedev_selftest_section(struct tapedev_section *sec) {
+  struct tapedev_device *dev = sec->device;
+  u32 tape_no;
+  int err;
+
+  DEBUG("=== selftest sec=%d START ===\n", sec->id);
+
+  tape_no = TDEV_SECTION_IOR(dev, sec->id, TAPEDEV_SECT_TAPE_NO_ADDR);
+  DEBUG("sec=%d initial TAPE_NO=%u (oczekiwane 0)\n", sec->id, tape_no);
+
+  err = tapedev_take_tape(sec, 1);
+  DEBUG("sec=%d TAKE_TAPE(1) -> err=%d\n", sec->id, err);
+  if (err)
+    return;
+
+  tape_no = TDEV_SECTION_IOR(dev, sec->id, TAPEDEV_SECT_TAPE_NO_ADDR);
+  DEBUG("sec=%d after TAKE: TAPE_NO=%u (oczekiwane 1)\n", sec->id, tape_no);
+
+  err = tapedev_rewind(sec);
+  DEBUG("sec=%d REWIND -> err=%d\n", sec->id, err);
+
+  err = tapedev_fast_fwd(sec, 2);
+  DEBUG("sec=%d FAST_FWD(2) -> err=%d\n", sec->id, err);
+
+  err = tapedev_eject_tape(sec);
+  DEBUG("sec=%d EJECT -> err=%d\n", sec->id, err);
+
+  tape_no = TDEV_SECTION_IOR(dev, sec->id, TAPEDEV_SECT_TAPE_NO_ADDR);
+  DEBUG("sec=%d after EJECT: TAPE_NO=%u (oczekiwane 0)\n", sec->id, tape_no);
+
+  err = tapedev_eject_tape(sec);
+  DEBUG("sec=%d EJECT bez tasmy -> err=%d (oczekiwany blad)\n", sec->id, err);
+
+  DEBUG("=== selftest sec=%d END ===\n", sec->id);
+}
+
+// TODOP: Remove. Just for test.
+static void tapedev_test_rw(struct tapedev_section *sec) {
+  struct tapedev_device *dev = sec->device;
+  void *buf;
+  dma_addr_t buf_dma;
+  size_t buf_size;
+  u32 n_blocks = 2;
+  int err;
+  bool match;
+  u8 *b;
+
+  DEBUG("=== test_rw sec=%d START ===\n", sec->id);
+
+  buf_size = n_blocks * sec->block_size; /* 2 * 4096 = 8 KB */
+
+  buf = dma_alloc_coherent(&dev->pdev->dev, buf_size, &buf_dma, GFP_KERNEL);
+  if (!buf) {
+    DEBUG("test_rw sec=%d alloc fail\n", sec->id);
+    return;
+  }
+  b = buf;
+  DEBUG("test_rw sec=%d buf_dma=0x%llx size=%zu\n", sec->id, (u64)buf_dma,
+        buf_size);
+
+  if ((err = tapedev_take_tape(sec, 1)))
+    goto out_free;
+
+  if ((err = tapedev_rewind(sec)))
+    goto out_eject;
+
+  memset(buf, 0xAB, buf_size);
+  b[0] = 0xDE;
+  b[sec->block_size] = 0xAD;
+
+  fill_pgtable_entry(sec, 0, buf_dma, n_blocks);
+  clear_pgtable_after(sec, 1);
+
+  err = tapedev_write(sec, n_blocks, 0);
+  DEBUG("test_rw sec=%d WRITE -> err=%d\n", sec->id, err);
+  if (err)
+    goto out_eject;
+
+  if ((err = tapedev_rewind(sec)))
+    goto out_eject;
+
+  memset(buf, 0, buf_size);
+
+  fill_pgtable_entry(sec, 0, buf_dma, n_blocks);
+  clear_pgtable_after(sec, 1);
+
+  err = tapedev_read(sec, n_blocks, 0);
+  DEBUG("test_rw sec=%d READ -> err=%d\n", sec->id, err);
+  if (err)
+    goto out_eject;
+
+  match = (b[0] == 0xDE) && (b[1] == 0xAB) && (b[sec->block_size] == 0xAD) &&
+          (b[sec->block_size + 1] == 0xAB) && (b[buf_size - 1] == 0xAB);
+  DEBUG("test_rw sec=%d match=%s  b[0]=0x%02x b[1]=0x%02x "
+        "b[%u]=0x%02x b[last]=0x%02x\n",
+        sec->id, match ? "YES" : "NO", b[0], b[1], sec->block_size,
+        b[sec->block_size], b[buf_size - 1]);
+
+out_eject:
+  tapedev_eject_tape(sec);
+out_free:
+  dma_free_coherent(&dev->pdev->dev, buf_size, buf, buf_dma);
+  DEBUG("=== test_rw sec=%d END ===\n", sec->id);
 }
 
 // =================== PCI DRIVER ===================
@@ -488,6 +631,12 @@ static int tapedev_probe(struct pci_dev *pdev,
       goto out_sections;
     }
   }
+
+  // TODOP: Remove
+  for (i = 0; i < dev->section_count; i++)
+    tapedev_selftest_section(&dev->sections[i]);
+  for (i = 0; i < dev->section_count; i++)
+    tapedev_test_rw(&dev->sections[i]);
 
   // TODOP: Change to DEBUG;
   dev_info(&pdev->dev, "tapedev%d ready, %u sections\n", dev->idx,
