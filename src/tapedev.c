@@ -1,3 +1,4 @@
+#include <linux/blk-mq.h>
 #include <linux/blkdev.h>
 #include <linux/dma-mapping.h>
 #include <linux/interrupt.h>
@@ -11,8 +12,10 @@
 
 #include "asm-generic/errno-base.h"
 #include "asm-generic/errno.h"
+#include "linux/blk_types.h"
 #include "linux/byteorder/generic.h"
 #include "linux/device.h"
+#include "linux/nodemask_types.h"
 #include "tapedev.h"
 
 #define DEBUG_ON
@@ -74,6 +77,14 @@ struct tapedev_section {
   // === DMA ===
   void *pgtable;
   dma_addr_t pgtable_dma;
+
+  // === Block Layer ===
+  struct gendisk *gd;
+  struct blk_mq_tag_set tag_set;
+  /// The tape we're currently on. 0 means no tape.
+  u32 current_tape;
+  /// The position within the tape (in blocks).
+  u64 current_pos;
 };
 
 struct tapedev_device {
@@ -238,15 +249,60 @@ static int tapedev_enable_hw(struct tapedev_device *dev) {
   return 0;
 }
 
+static int tapedev_open(struct gendisk *disk, blk_mode_t mode) {
+  // TODOP: Implement
+  return 0;
+}
+
+static void tapedev_release(struct gendisk *disk) {
+  // TODOP: Implement
+  return;
+}
+
+/**
+ * @brief Invoked  by the block layer for each request.
+ */
+static blk_status_t tapedev_queue_rq(struct blk_mq_hw_ctx *hctx,
+                                     const struct blk_mq_queue_data *bd) {
+  struct request *rq = bd->rq;
+  struct tapedev_section *sec = rq->q->queuedata;
+
+  blk_mq_start_request(rq);
+
+  DEBUG("queue_rq sec=%d op=%u pos=%llu bytes=%u\n", sec->id, req_op(rq),
+        (u64)blk_rq_pos(rq), blk_rq_bytes(rq));
+
+  // TODOP: Do the work
+
+  blk_mq_end_request(rq, BLK_STS_IOERR);
+  return BLK_STS_OK;
+}
+
+static struct blk_mq_ops tapedev_mq_ops = {
+    .queue_rq = tapedev_queue_rq,
+};
+
+static const struct block_device_operations tapedev_block_ops = {
+    .owner = THIS_MODULE,
+    .open = tapedev_open,
+    .release = tapedev_release,
+    // .ioctl = tapedev_ioclt,
+};
+
 // =================== SECTION INIT & DEINIT ===================
 static int tapedev_init_section(struct tapedev_device *dev, int i) {
   struct tapedev_section *sec = &dev->sections[i];
+  u64 total_sectors;
+  int err;
 
+  // Initialize general data.
   sec->device = dev;
   sec->id = i;
   mutex_init(&sec->cmd_mutex);
   init_waitqueue_head(&sec->cmd_wq);
   sec->cmd_done = false;
+  sec->current_tape = 0;
+  sec->current_pos = 0;
 
   sec->tapes_count = TDEV_SECTION_IOR(dev, i, TAPEDEV_SECT_TAPES_ADDR);
   sec->tape_type = TDEV_SECTION_IOR(dev, i, TAPEDEV_SECT_TAPE_SIZE_ADDR);
@@ -256,72 +312,101 @@ static int tapedev_init_section(struct tapedev_device *dev, int i) {
   TDEV_SECTION_IOW(dev, i, TAPEDEV_SECT_TAPE_BLOCKSIZE_ADDR,
                    TAPEDEV_SECT_BLOCKSIZE_4096);
 
+  // Initialize the pgtable.
   sec->pgtable = dma_alloc_coherent(&dev->pdev->dev, TAPEDEV_BUF_PGTABLE_SIZE,
                                     &sec->pgtable_dma, GFP_KERNEL);
   if (!sec->pgtable)
     return -ENOMEM;
-  // TODOP: Change to debug.
-  dev_info(&dev->pdev->dev, "section %d: %u tapes, type %u, %llu B per tape\n",
-           i, sec->tapes_count, sec->tape_type, sec->tape_size);
+
+  // Initialize the block layer.
+
+  // Initialize tag set.
+  memset(&sec->tag_set, 0, sizeof(sec->tag_set)); // TODOP: Needed?
+  sec->tag_set.ops = &tapedev_mq_ops;
+  sec->tag_set.nr_hw_queues = 1;
+  sec->tag_set.queue_depth = 1; // TODOP: Validate
+  sec->tag_set.numa_node = NUMA_NO_NODE;
+  sec->tag_set.cmd_size = 0;
+  sec->tag_set.flags = BLK_MQ_F_SHOULD_MERGE | BLK_MQ_F_BLOCKING;
+
+  err = blk_mq_alloc_tag_set(&sec->tag_set);
+  if (err) {
+    dev_err(&dev->pdev->dev, "blk_mq_alloc_tag_set failed: %d\n", err);
+    goto out_pgtable;
+  }
+
+  // Initialize the gendisk
+  // https://linux-kernel-labs.github.io/refs/heads/master/labs/block_device_drivers.html
+  sec->gd = blk_mq_alloc_disk(&sec->tag_set, sec, &sec->queue);
+  if (IS_ERR(sec->gd)) {
+    err = PTR_ERR(sec->gd);
+    dev_err(&dev->pdev->dev, "blk_mq_alloc_disk failed: %d\n", err);
+    sec->gd = NULL;
+    goto out_tagset;
+  }
+
+  sec->gd->major = tapedev_major;
+  sec->gd->first_minor = dev->idx * TAPEDEV_MAX_SECTIONS + i;
+  sec->gd->minors = 1;
+  sec->gd->fops = &tapedev_block_ops;
+  sec->gd->private_data = sec;
+  snprintf(sec->gd->disk_name, DISK_NAME_LEN, "tapedev%ds%d", dev->idx, i);
+
+  // Queue limits.
+  blk_queue_logical_block_size(sec->gd->queue, sec->block_size);
+  blk_queue_physical_block_size(sec->gd->queue, sec->block_size);
+  // Maximum number of segments per request - 512
+  blk_queue_max_segments(sec->gd->queue, TAPEDEV_BUF_PGTABLE_ENTRIES);
+  // Maximum size of a single request. 4096 sectors * 512.
+  blk_queue_max_hw_sectors(sec->gd->queue, 4096);
+  // DMA buffers have to be aligned to block_size.
+  blk_queue_dma_alignment(sec->gd->queue, sec->block_size - 1);
+
+  total_sectors = ((u64)sec->tapes_count * sec->tape_size) >> 9;
+  set_capacity(sec->gd, total_sectors);
+
+  // Add the disk.
+  err = device_add_disk(&dev->pdev->dev, sec->gd, NULL);
+  if (err) {
+    dev_err(&dev->pdev->dev, "device_add_disk failed: %d\n", err);
+    goto out_putdisk;
+  }
+
+  dev_info(&dev->pdev->dev,
+           "section %d: %u tapes, type %u, %llu B per tape, /dev/%s (%llu "
+           "sectors)\n",
+           i, sec->tapes_count, sec->tape_type, sec->tape_size,
+           sec->gd->disk_name, total_sectors);
   return 0;
+
+out_putdisk:
+  put_disk(sec->gd);
+  sec->gd = NULL;
+out_tagset:
+  blk_mq_free_tag_set(&sec->tag_set);
+out_pgtable:
+  dma_free_coherent(&dev->pdev->dev, TAPEDEV_BUF_PGTABLE_SIZE, sec->pgtable,
+                    sec->pgtable_dma);
+  sec->pgtable = NULL;
+  return err;
 }
 
 static void tapedev_free_section(struct tapedev_device *dev, int i) {
   struct tapedev_section *sec = &dev->sections[i];
+
+  if (sec->gd) {
+    del_gendisk(sec->gd);
+    put_disk(sec->gd);
+    sec->gd = NULL;
+    blk_mq_free_tag_set(&sec->tag_set);
+  }
+
   if (sec->pgtable) {
     dma_free_coherent(&dev->pdev->dev, TAPEDEV_BUF_PGTABLE_SIZE, sec->pgtable,
                       sec->pgtable_dma);
     sec->pgtable = NULL;
   }
 }
-
-// =================== BLOCK DEVICE ===================
-// static int tapedev_open(struct block_device *bdev, fmode_t mode) {
-//   // TODOP: Implement
-//   return 0;
-// }
-
-// static int tapedev_release(struct gendisk *gd, fmode_t mode) {
-//   // TODOP: Implement
-//   return 0;
-// }
-
-// static const struct block_device_operations tapedev_ops = {
-//     .owner = THIS_MODULE,
-//     .open = tapedev_open,
-//     .release = tapedev_release,
-//     // .ioctl = tapedev_ioclt,
-// };
-
-// static int create_block_device(struct tapedev_device *dev) {
-
-//   // Initialize the gendisk structure.
-//   dev->gd = alloc_disk(TAPEDEV_MINOR);
-//   if (!dev->gd) {
-//     printk(KERN_NOTICE "alloc_disk failure");
-//     return -ENOMEM;
-//   }
-
-//   // Fill out the gendisk fields.
-//   dev->gd->major = TAPEDEV_MAJOR;
-//   dev->gd->first_minor = TAPEDEV_MINOR;
-//   dev->gd->fops = &tapedev_ops;
-//   dev->gd->queue = dev->queue;
-//   dev->gd->private_data = dev;
-//   snprintf(dev->gd->disk_name, 32, "tapedev");
-//   set_capacity(dev->gd, NR_SECTORS);
-
-//   // TODOP: Implement.
-//   add_disk(dev->gd);
-//   return 0;
-// }
-
-// static int delete_block_device(struct tapedev_device *dev) {
-//   if (dev->gd)
-//     del_gendisk(dev->gd);
-//   // TODOP: Implement
-// }
-//
 
 // =================== COMMANDS ===================
 static const char *tapedev_status_name(u32 status) {
@@ -453,112 +538,6 @@ static int tapedev_write(struct tapedev_section *sec, u32 block_count,
   return tapedev_send_cmd(sec, cmd, sec->pgtable_dma);
 }
 
-// TODOP: Remove. Just for test.
-static void tapedev_selftest_section(struct tapedev_section *sec) {
-  struct tapedev_device *dev = sec->device;
-  u32 tape_no;
-  int err;
-
-  DEBUG("=== selftest sec=%d START ===\n", sec->id);
-
-  tape_no = TDEV_SECTION_IOR(dev, sec->id, TAPEDEV_SECT_TAPE_NO_ADDR);
-  DEBUG("sec=%d initial TAPE_NO=%u (oczekiwane 0)\n", sec->id, tape_no);
-
-  err = tapedev_take_tape(sec, 1);
-  DEBUG("sec=%d TAKE_TAPE(1) -> err=%d\n", sec->id, err);
-  if (err)
-    return;
-
-  tape_no = TDEV_SECTION_IOR(dev, sec->id, TAPEDEV_SECT_TAPE_NO_ADDR);
-  DEBUG("sec=%d after TAKE: TAPE_NO=%u (oczekiwane 1)\n", sec->id, tape_no);
-
-  err = tapedev_rewind(sec);
-  DEBUG("sec=%d REWIND -> err=%d\n", sec->id, err);
-
-  err = tapedev_fast_fwd(sec, 2);
-  DEBUG("sec=%d FAST_FWD(2) -> err=%d\n", sec->id, err);
-
-  err = tapedev_eject_tape(sec);
-  DEBUG("sec=%d EJECT -> err=%d\n", sec->id, err);
-
-  tape_no = TDEV_SECTION_IOR(dev, sec->id, TAPEDEV_SECT_TAPE_NO_ADDR);
-  DEBUG("sec=%d after EJECT: TAPE_NO=%u (oczekiwane 0)\n", sec->id, tape_no);
-
-  err = tapedev_eject_tape(sec);
-  DEBUG("sec=%d EJECT bez tasmy -> err=%d (oczekiwany blad)\n", sec->id, err);
-
-  DEBUG("=== selftest sec=%d END ===\n", sec->id);
-}
-
-// TODOP: Remove. Just for test.
-static void tapedev_test_rw(struct tapedev_section *sec) {
-  struct tapedev_device *dev = sec->device;
-  void *buf;
-  dma_addr_t buf_dma;
-  size_t buf_size;
-  u32 n_blocks = 2;
-  int err;
-  bool match;
-  u8 *b;
-
-  DEBUG("=== test_rw sec=%d START ===\n", sec->id);
-
-  buf_size = n_blocks * sec->block_size; /* 2 * 4096 = 8 KB */
-
-  buf = dma_alloc_coherent(&dev->pdev->dev, buf_size, &buf_dma, GFP_KERNEL);
-  if (!buf) {
-    DEBUG("test_rw sec=%d alloc fail\n", sec->id);
-    return;
-  }
-  b = buf;
-  DEBUG("test_rw sec=%d buf_dma=0x%llx size=%zu\n", sec->id, (u64)buf_dma,
-        buf_size);
-
-  if ((err = tapedev_take_tape(sec, 1)))
-    goto out_free;
-
-  if ((err = tapedev_rewind(sec)))
-    goto out_eject;
-
-  memset(buf, 0xAB, buf_size);
-  b[0] = 0xDE;
-  b[sec->block_size] = 0xAD;
-
-  fill_pgtable_entry(sec, 0, buf_dma, n_blocks);
-  clear_pgtable_after(sec, 1);
-
-  err = tapedev_write(sec, n_blocks, 0);
-  DEBUG("test_rw sec=%d WRITE -> err=%d\n", sec->id, err);
-  if (err)
-    goto out_eject;
-
-  if ((err = tapedev_rewind(sec)))
-    goto out_eject;
-
-  memset(buf, 0, buf_size);
-
-  fill_pgtable_entry(sec, 0, buf_dma, n_blocks);
-  clear_pgtable_after(sec, 1);
-
-  err = tapedev_read(sec, n_blocks, 0);
-  DEBUG("test_rw sec=%d READ -> err=%d\n", sec->id, err);
-  if (err)
-    goto out_eject;
-
-  match = (b[0] == 0xDE) && (b[1] == 0xAB) && (b[sec->block_size] == 0xAD) &&
-          (b[sec->block_size + 1] == 0xAB) && (b[buf_size - 1] == 0xAB);
-  DEBUG("test_rw sec=%d match=%s  b[0]=0x%02x b[1]=0x%02x "
-        "b[%u]=0x%02x b[last]=0x%02x\n",
-        sec->id, match ? "YES" : "NO", b[0], b[1], sec->block_size,
-        b[sec->block_size], b[buf_size - 1]);
-
-out_eject:
-  tapedev_eject_tape(sec);
-out_free:
-  dma_free_coherent(&dev->pdev->dev, buf_size, buf, buf_dma);
-  DEBUG("=== test_rw sec=%d END ===\n", sec->id);
-}
-
 // =================== PCI DRIVER ===================
 
 static int tapedev_probe(struct pci_dev *pdev,
@@ -631,12 +610,6 @@ static int tapedev_probe(struct pci_dev *pdev,
       goto out_sections;
     }
   }
-
-  // TODOP: Remove
-  for (i = 0; i < dev->section_count; i++)
-    tapedev_selftest_section(&dev->sections[i]);
-  for (i = 0; i < dev->section_count; i++)
-    tapedev_test_rw(&dev->sections[i]);
 
   // TODOP: Change to DEBUG;
   dev_info(&pdev->dev, "tapedev%d ready, %u sections\n", dev->idx,
