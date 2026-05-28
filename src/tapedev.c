@@ -10,12 +10,6 @@
 #include <linux/spinlock.h>
 #include <linux/wait.h>
 
-#include "asm-generic/errno-base.h"
-#include "asm-generic/errno.h"
-#include "linux/blk_types.h"
-#include "linux/byteorder/generic.h"
-#include "linux/device.h"
-#include "linux/nodemask_types.h"
 #include "tapedev.h"
 
 #define DEBUG_ON
@@ -133,6 +127,7 @@ static int tapedev_major;
  * @p addr DMA address if the buffer (512B-aligned)
  * @p block_count block size
  */
+[[maybe_unused]]
 static void fill_pgtable_entry(struct tapedev_section *sec, int idx,
                                dma_addr_t addr, u32 block_count) {
   __le64 *pgt = sec->pgtable;
@@ -147,6 +142,7 @@ static void fill_pgtable_entry(struct tapedev_section *sec, int idx,
 /**
  * @brief Clear the pgtable entries starting from `keep_n`
  */
+[[maybe_unused]]
 static void clear_pgtable_after(struct tapedev_section *sec, int keep_n) {
   __le64 *pgt = sec->pgtable;
   int i;
@@ -327,7 +323,7 @@ static int tapedev_init_section(struct tapedev_device *dev, int i) {
   sec->tag_set.queue_depth = 1; // TODOP: Validate
   sec->tag_set.numa_node = NUMA_NO_NODE;
   sec->tag_set.cmd_size = 0;
-  sec->tag_set.flags = BLK_MQ_F_SHOULD_MERGE | BLK_MQ_F_BLOCKING;
+  sec->tag_set.flags = BLK_MQ_F_BLOCKING;
 
   err = blk_mq_alloc_tag_set(&sec->tag_set);
   if (err) {
@@ -335,9 +331,21 @@ static int tapedev_init_section(struct tapedev_device *dev, int i) {
     goto out_pgtable;
   }
 
+  struct queue_limits limits = {
+      .logical_block_size = sec->block_size,
+      .physical_block_size = sec->block_size,
+      .io_min = sec->block_size,
+      .io_opt = sec->block_size,
+      // Maximum number of segments per request - 512
+      .max_segments = TAPEDEV_BUF_PGTABLE_ENTRIES,
+      // Maximum size of a single request. 4096 sectors * 512 = 2MB.
+      .max_hw_sectors = 4096,
+      .dma_alignment = sec->block_size - 1,
+  };
+
   // Initialize the gendisk
   // https://linux-kernel-labs.github.io/refs/heads/master/labs/block_device_drivers.html
-  sec->gd = blk_mq_alloc_disk(&sec->tag_set, sec, &sec->queue);
+  sec->gd = blk_mq_alloc_disk(&sec->tag_set, &limits, sec);
   if (IS_ERR(sec->gd)) {
     err = PTR_ERR(sec->gd);
     dev_err(&dev->pdev->dev, "blk_mq_alloc_disk failed: %d\n", err);
@@ -351,16 +359,6 @@ static int tapedev_init_section(struct tapedev_device *dev, int i) {
   sec->gd->fops = &tapedev_block_ops;
   sec->gd->private_data = sec;
   snprintf(sec->gd->disk_name, DISK_NAME_LEN, "tapedev%ds%d", dev->idx, i);
-
-  // Queue limits.
-  blk_queue_logical_block_size(sec->gd->queue, sec->block_size);
-  blk_queue_physical_block_size(sec->gd->queue, sec->block_size);
-  // Maximum number of segments per request - 512
-  blk_queue_max_segments(sec->gd->queue, TAPEDEV_BUF_PGTABLE_ENTRIES);
-  // Maximum size of a single request. 4096 sectors * 512.
-  blk_queue_max_hw_sectors(sec->gd->queue, 4096);
-  // DMA buffers have to be aligned to block_size.
-  blk_queue_dma_alignment(sec->gd->queue, sec->block_size - 1);
 
   total_sectors = ((u64)sec->tapes_count * sec->tape_size) >> 9;
   set_capacity(sec->gd, total_sectors);
@@ -515,23 +513,29 @@ static int tapedev_send_cmd(struct tapedev_section *sec, u32 cmd,
 }
 
 // =================== COMMAND WRAPPERS ===================
+[[maybe_unused]]
 static int tapedev_take_tape(struct tapedev_section *sec, u32 tape_number) {
   return tapedev_send_cmd(sec, TAPEDEV_CMD_TAKE_TAPE | (tape_number << 8), 0);
 }
+[[maybe_unused]]
 static int tapedev_eject_tape(struct tapedev_section *sec) {
   return tapedev_send_cmd(sec, TAPEDEV_CMD_EJECT_TAPE, 0);
 }
+[[maybe_unused]]
 static int tapedev_rewind(struct tapedev_section *sec) {
   return tapedev_send_cmd(sec, TAPEDEV_CMD_REWIND, 0);
 }
+[[maybe_unused]]
 static int tapedev_fast_fwd(struct tapedev_section *sec, u32 block_count) {
   return tapedev_send_cmd(sec, TAPEDEV_CMD_FAST_FWD | (block_count << 8), 0);
 }
+[[maybe_unused]]
 static int tapedev_read(struct tapedev_section *sec, u32 block_count,
                         u32 offset) {
   u32 cmd = TAPEDEV_CMD_READ | (block_count << 8) | (offset << 23);
   return tapedev_send_cmd(sec, cmd, sec->pgtable_dma);
 }
+[[maybe_unused]]
 static int tapedev_write(struct tapedev_section *sec, u32 block_count,
                          u32 offset) {
   u32 cmd = TAPEDEV_CMD_WRITE | (block_count << 8) | (offset << 23);
