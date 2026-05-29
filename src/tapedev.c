@@ -10,6 +10,8 @@
 #include <linux/spinlock.h>
 #include <linux/wait.h>
 
+#include "linux/device.h"
+#include "linux/types.h"
 #include "tapedev.h"
 
 #define DEBUG_ON
@@ -640,6 +642,51 @@ end:
 static struct blk_mq_ops tapedev_mq_ops = {
     .queue_rq = tapedev_queue_rq,
 };
+
+// =================== SYSFS ===================
+static struct tapedev_section *dev_to_section(struct device *dev) {
+  struct gendisk *disk = dev_to_disk(dev);
+  return disk->private_data;
+}
+
+static ssize_t tape_type_show(struct device *dev, struct device_attribute *attr,
+                              char *buf) {
+  struct tapedev_section *sec = dev_to_section(dev);
+  return sysfs_emit(buf, "%u\n", sec->tape_type);
+}
+
+static ssize_t tapes_show(struct device *dev, struct device_attribute *attr,
+                          char *buf) {
+  struct tapedev_section *sec = dev_to_section(dev);
+  return sysfs_emit(buf, "%u\n", sec->tapes_count);
+}
+
+static ssize_t current_tape_show(struct device *dev,
+                                 struct device_attribute *attr, char *buf) {
+  struct tapedev_section *sec = dev_to_section(dev);
+  return sysfs_emit(buf, "%u\n", sec->current_tape);
+}
+static DEVICE_ATTR_RO(tape_type);
+static DEVICE_ATTR_RO(tapes);
+static DEVICE_ATTR_RO(current_tape);
+
+static struct attribute *tapedev_tape_attrs[] = {
+    &dev_attr_tape_type.attr,
+    &dev_attr_tapes.attr,
+    &dev_attr_current_tape.attr,
+    NULL,
+};
+
+static const struct attribute_group tapedev_tape_group = {
+    .name = "tape",
+    .attrs = tapedev_tape_attrs,
+};
+
+static const struct attribute_group *tapedev_disk_groups[] = {
+    &tapedev_tape_group,
+    NULL,
+};
+
 // =================== SECTION INIT & DEINIT ===================
 static int tapedev_init_section(struct tapedev_device *dev, int i) {
   struct tapedev_section *sec = &dev->sections[i];
@@ -729,7 +776,7 @@ static int tapedev_init_section(struct tapedev_device *dev, int i) {
   set_capacity(sec->gd, total_sectors);
 
   // Add the disk.
-  err = device_add_disk(&dev->pdev->dev, sec->gd, NULL);
+  err = device_add_disk(&dev->pdev->dev, sec->gd, tapedev_disk_groups);
   if (err) {
     dev_err(&dev->pdev->dev, "device_add_disk failed: %d\n", err);
     goto out_putdisk;
