@@ -6,3 +6,11 @@
 *.symvers
 *.order
 *.mod*
+zig-zag-order
+rw-vector
+rw-direct
+rw-basic
+eject
+backward-order
+ioctl-read
+random-order

@@ -10,6 +10,7 @@
 #include <linux/spinlock.h>
 #include <linux/wait.h>
 
+#include "asm-generic/errno.h"
 #include "tapedev.h"
 
 #define DEBUG_ON
@@ -325,7 +326,6 @@ static void tapedev_release(struct gendisk *disk) {
   // TODOP: Implement
   return;
 }
-
 
 // =================== COMMANDS ===================
 static const char *tapedev_status_name(u32 status) {
@@ -646,7 +646,6 @@ static struct blk_mq_ops tapedev_mq_ops = {
     .queue_rq = tapedev_queue_rq,
 };
 
-
 // =================== IOCTL ===================
 struct tapedev_sect_info {
   uint32_t tapes;
@@ -673,16 +672,14 @@ static int tapedev_ioctl_eject_tape(struct tapedev_section *sec) {
   // Wait for all active commands to complete.
   mutex_lock(&sec->io_mutex);
 
-  // Already ejected.
-  if (sec->current_tape == 0) {
+  err = tapedev_eject_tape(sec);
+  if (err == 0 || err == -ENOMEDIUM) {
+    sec->current_tape = 0;
+    sec->current_pos = 0;
     mutex_unlock(&sec->io_mutex);
     return 0;
   }
 
-  err = tapedev_eject_tape(sec);
-
-  // In error the state of the tapes is undefined, so we zero them. On success
-  // we zero it as well since we ejected the tape.
   sec->current_tape = 0;
   sec->current_pos = 0;
   mutex_unlock(&sec->io_mutex);
@@ -692,7 +689,7 @@ static int tapedev_ioctl_eject_tape(struct tapedev_section *sec) {
 static int tapedev_ioctl(struct block_device *bdev, blk_mode_t mode,
                          unsigned int cmd, unsigned long arg) {
   struct tapedev_section *sec = bdev->bd_disk->private_data;
-  
+
   DEBUG("ioctl sec=%d cmd=0x%x\n", sec->id, cmd);
 
   switch (cmd) {
@@ -704,7 +701,6 @@ static int tapedev_ioctl(struct block_device *bdev, blk_mode_t mode,
     return -ENOTTY;
   }
 }
-
 
 static const struct block_device_operations tapedev_block_ops = {
     .owner = THIS_MODULE,
@@ -787,7 +783,16 @@ static int tapedev_init_section(struct tapedev_device *dev, int i) {
   if (!sec->pgtable)
     return -ENOMEM;
 
-  // Initialize the block layer.
+  u32 actual = TDEV_SECTION_IOR(dev, i, TAPEDEV_SECT_TAPE_NO_ADDR);
+  if (actual != 0) {
+    dev_info(&dev->pdev->dev,
+             "section %d: tape %u from prev session, ejecting\n", i, actual);
+    sec->current_tape = actual;
+    if (tapedev_eject_tape(sec) == 0) {
+      sec->current_tape = 0;
+      sec->current_pos = 0;
+    }
+  }
 
   // Scatter gather list.
   sec->sgl =
@@ -1003,6 +1008,15 @@ static void tapedev_remove(struct pci_dev *pdev) {
   // Strongly inspired by `adlerdev_remove`.
   struct tapedev_device *dev = pci_get_drvdata(pdev);
   int i;
+
+  // Eject all tapes.
+  for (i = 0; i < dev->section_count; i++) {
+    struct tapedev_section *sec = &dev->sections[i];
+    if (sec->current_tape != 0) {
+      tapedev_eject_tape(sec);
+      sec->current_tape = 0;
+    }
+  }
 
   // Mask all interrupts when disableing the device.
   TDEV_IOW(dev, TAPEDEV_IRQ_MASK_ADDR, ~0u);
