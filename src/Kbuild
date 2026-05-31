@@ -1,3 +1,4 @@
 obj-m := tapedev.o
+tapedev-y := tapedev_main.o tapedev_blk.o tapedev_cmd.o tapedev_sysfs.o
 
 ccflags-y := -Wall
