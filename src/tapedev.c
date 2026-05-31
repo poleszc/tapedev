@@ -10,8 +10,6 @@
 #include <linux/spinlock.h>
 #include <linux/wait.h>
 
-#include "linux/device.h"
-#include "linux/types.h"
 #include "tapedev.h"
 
 #define DEBUG_ON
@@ -28,6 +26,10 @@
 #endif
 #define TAPEDEV_MAX_DEVICES 256
 #define TAPEDEV_MAX_SECTIONS 8
+
+// TODOP: Here of in the header?
+#define TAPEDEV_IOCTL_EJECT_TAPE _IO('~', 1)
+#define TAPEDEV_IOCTL_GET_INFO _IOR('~', 0, struct tapedev_sect_info)
 
 // Sources:
 // https://linux-kernel-labs.github.io/refs/heads/master/labs/block_device_drivers.html
@@ -54,6 +56,9 @@ struct tapedev_section {
 
   // === Command synchronization ===
   struct mutex cmd_mutex;
+  // Mutex for performing ioctl calls and waiting for all reads/writes to end
+  // before it.
+  struct mutex io_mutex;
   wait_queue_head_t cmd_wq;
   /// Set in the interrupt, zeroed before inserting a command
   bool cmd_done;
@@ -274,7 +279,6 @@ static irqreturn_t tapedev_isr(int irg, void *opaque) {
   spin_unlock_irqrestore(&dev->slock, flags);
   return IRQ_HANDLED;
 }
-
 // =================== STARTING THE DEVICE ===================
 static int tapedev_enable_hw(struct tapedev_device *dev) {
   u32 mask;
@@ -322,12 +326,6 @@ static void tapedev_release(struct gendisk *disk) {
   return;
 }
 
-static const struct block_device_operations tapedev_block_ops = {
-    .owner = THIS_MODULE,
-    .open = tapedev_open,
-    .release = tapedev_release,
-    // .ioctl = tapedev_ioclt,
-};
 
 // =================== COMMANDS ===================
 static const char *tapedev_status_name(u32 status) {
@@ -546,6 +544,8 @@ static blk_status_t tapedev_queue_rq(struct blk_mq_hw_ctx *hctx,
   DEBUG("queue_rq sec=%d op=%u pos=%llu bytes=%u\n", sec->id, req_op(rq),
         (u64)blk_rq_pos(rq), blk_rq_bytes(rq));
 
+  mutex_lock(&sec->io_mutex);
+
   // We hanldle only reads and writes.
   if (op != REQ_OP_READ && op != REQ_OP_WRITE) {
     DEBUG("queue_rq sec=%d unsupported op=%u\n", sec->id, op);
@@ -567,6 +567,7 @@ static blk_status_t tapedev_queue_rq(struct blk_mq_hw_ctx *hctx,
   if (n_sg <= 0) {
     // Request should have at least one segment... at least I think so.
     DEBUG("queue_rq sec=%d blk_rq_map_sg=%d\n", sec->id, n_sg);
+    mutex_unlock(&sec->io_mutex);
     blk_mq_end_request(rq, BLK_STS_IOERR);
     return BLK_STS_OK;
   }
@@ -575,6 +576,7 @@ static blk_status_t tapedev_queue_rq(struct blk_mq_hw_ctx *hctx,
   n_mapped = dma_map_sg(&dev->pdev->dev, sec->sgl, n_sg, dma_dir);
   if (!n_mapped) {
     dev_err(&dev->pdev->dev, "dma_map_sg failed\n");
+    mutex_unlock(&sec->io_mutex);
     blk_mq_end_request(rq, BLK_STS_IOERR);
     return BLK_STS_OK;
   }
@@ -635,12 +637,80 @@ static blk_status_t tapedev_queue_rq(struct blk_mq_hw_ctx *hctx,
 
 end:
   dma_unmap_sg(&dev->pdev->dev, sec->sgl, n_sg, dma_dir);
+  mutex_unlock(&sec->io_mutex);
   blk_mq_end_request(rq, status);
   return BLK_STS_OK;
 }
 
 static struct blk_mq_ops tapedev_mq_ops = {
     .queue_rq = tapedev_queue_rq,
+};
+
+
+// =================== IOCTL ===================
+struct tapedev_sect_info {
+  uint32_t tapes;
+  uint32_t tape_type;
+  uint32_t current_tape;
+};
+
+static int tapedev_ioctl_get_info(struct tapedev_section *sec,
+                                  unsigned long arg) {
+  // Fill the struct and move to user space.
+  struct tapedev_sect_info info;
+  info.tapes = sec->tapes_count;
+  info.tape_type = sec->tape_type;
+  info.current_tape = sec->current_tape;
+
+  if (copy_to_user((void __user *)arg, &info, sizeof(info)))
+    return -EFAULT;
+  return 0;
+}
+
+static int tapedev_ioctl_eject_tape(struct tapedev_section *sec) {
+  int err = 0;
+
+  // Wait for all active commands to complete.
+  mutex_lock(&sec->io_mutex);
+
+  // Already ejected.
+  if (sec->current_tape == 0) {
+    mutex_unlock(&sec->io_mutex);
+    return 0;
+  }
+
+  err = tapedev_eject_tape(sec);
+
+  // In error the state of the tapes is undefined, so we zero them. On success
+  // we zero it as well since we ejected the tape.
+  sec->current_tape = 0;
+  sec->current_pos = 0;
+  mutex_unlock(&sec->io_mutex);
+  return err;
+}
+
+static int tapedev_ioctl(struct block_device *bdev, blk_mode_t mode,
+                         unsigned int cmd, unsigned long arg) {
+  struct tapedev_section *sec = bdev->bd_disk->private_data;
+  
+  DEBUG("ioctl sec=%d cmd=0x%x\n", sec->id, cmd);
+
+  switch (cmd) {
+  case TAPEDEV_IOCTL_GET_INFO:
+    return tapedev_ioctl_get_info(sec, arg);
+  case TAPEDEV_IOCTL_EJECT_TAPE:
+    return tapedev_ioctl_eject_tape(sec);
+  default:
+    return -ENOTTY;
+  }
+}
+
+
+static const struct block_device_operations tapedev_block_ops = {
+    .owner = THIS_MODULE,
+    .open = tapedev_open,
+    .release = tapedev_release,
+    .ioctl = tapedev_ioctl,
 };
 
 // =================== SYSFS ===================
@@ -697,6 +767,7 @@ static int tapedev_init_section(struct tapedev_device *dev, int i) {
   sec->device = dev;
   sec->id = i;
   mutex_init(&sec->cmd_mutex);
+  mutex_init(&sec->io_mutex);
   init_waitqueue_head(&sec->cmd_wq);
   sec->cmd_done = false;
   sec->current_tape = 0;
@@ -822,6 +893,7 @@ static void tapedev_free_section(struct tapedev_device *dev, int i) {
                       sec->pgtable_dma);
     sec->pgtable = NULL;
   }
+  // TODOP: Free the mutex?
 }
 
 // =================== PCI DRIVER ===================
