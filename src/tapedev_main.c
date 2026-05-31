@@ -3,6 +3,8 @@
 // Sources:
 // https://linux-kernel-labs.github.io/refs/heads/master/labs/block_device_drivers.html
 // adlerdev.c - from labs
+// https://achilles.tu.kielce.pl/portal/Members/eb68b762b9f54e23b7ad8c0787719cef/operating-systems-2/instructions/os2_laboratory_9.pdf
+// https://elixir.bootlin.com/linux/v6.18.5/source/drivers/block/ps3disk.c
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("tapedev device driver");
 MODULE_AUTHOR("poleszc");
@@ -17,6 +19,7 @@ int tapedev_major;
 
 // =================== INTERRUPTS ===================
 static irqreturn_t tapedev_isr(int irg, void *opaque) {
+  // Strongly inspired by `adlerdev_isr`.
   DEBUG("ISR Enter\n");
   struct tapedev_device *dev = opaque;
   unsigned long flags;
@@ -32,8 +35,8 @@ static irqreturn_t tapedev_isr(int irg, void *opaque) {
     return IRQ_NONE;
   }
 
-  // Init done - device has finished initing. Wake up someone waiting in
-  // tapedev_enable_hw().
+  // Device has finished initing. Wake up someone waiting in
+  // `tapedev_enable_device`.
   if (istatus & BIT(TAPEDEV_IRQ_INIT_DONE)) {
     DEBUG("ISR Done\n");
     dev->init_done = true;
@@ -44,7 +47,7 @@ static irqreturn_t tapedev_isr(int irg, void *opaque) {
   // Hardware error.
   if (istatus & BIT(TAPEDEV_IRQ_HW_ERROR)) {
     DEBUG("ISR Error\n");
-    dev_err(&dev->pdev->dev, "hardware error from device\n");
+    dev_err(&dev->pdev->dev, "hardware error from tapedev\n");
     handled |= BIT(TAPEDEV_IRQ_HW_ERROR);
   }
 
@@ -55,7 +58,7 @@ static irqreturn_t tapedev_isr(int irg, void *opaque) {
       DEBUG("ISR Section\n");
       struct tapedev_section *sec = &dev->sections[i];
 
-      // Save the status for it to be interpreted in the consumer thread.
+      // Save the status for it to be handled in `tapedev_send_cmd`
       sec->cmd_status = TDEV_SECTION_IOR(dev, i, TAPEDEV_SECT_STATUS_ADDR);
       sec->cmd_done = true;
       wake_up(&sec->cmd_wq);
@@ -73,7 +76,7 @@ static irqreturn_t tapedev_isr(int irg, void *opaque) {
 }
 
 // =================== STARTING THE DEVICE ===================
-static int tapedev_enable_hw(struct tapedev_device *dev) {
+static int tapedev_enable_device(struct tapedev_device *dev) {
   u32 mask;
   int i;
 
@@ -98,7 +101,7 @@ static int tapedev_enable_hw(struct tapedev_device *dev) {
   dev->section_count = TDEV_IOR(dev, TAPEDEV_SECTIONS_ADDR);
   if (dev->section_count == 0 || dev->section_count > TAPEDEV_MAX_SECTIONS) {
     DEBUG("Invalid section count\n");
-    return -EIO; // TODOP: Is tha so?
+    return -ENODEV;
   }
 
   for (i = 0; i < dev->section_count; i++) {
@@ -110,6 +113,27 @@ static int tapedev_enable_hw(struct tapedev_device *dev) {
 }
 
 // =================== PCI DRIVER ===================
+static int tapedev_alloc_idx(struct tapedev_device *dev) {
+  int i, err = -ENOSPC;
+  mutex_lock(&tapedev_devices_lock);
+  for (i = 0; i < TAPEDEV_MAX_DEVICES; i++) {
+    if (!tapedev_devices[i]) {
+      tapedev_devices[i] = dev;
+      dev->idx = i;
+      err = 0;
+      break;
+    }
+  }
+  mutex_unlock(&tapedev_devices_lock);
+  return err;
+}
+
+static void tapedev_free_idx(struct tapedev_device *dev) {
+  mutex_lock(&tapedev_devices_lock);
+  tapedev_devices[dev->idx] = 0;
+  mutex_unlock(&tapedev_devices_lock);
+}
+
 static int tapedev_probe(struct pci_dev *pdev,
                          const struct pci_device_id *pci_id) {
   // Strongly inspired by `adlerdev_probe`.
@@ -128,19 +152,9 @@ static int tapedev_probe(struct pci_dev *pdev,
   spin_lock_init(&dev->slock);
   init_waitqueue_head(&dev->init_wq);
 
-  // Allocate the free index.
-  mutex_lock(&tapedev_devices_lock);
-  for (i = 0; i < TAPEDEV_MAX_DEVICES; i++)
-    if (!tapedev_devices[i])
-      break;
-  if (i == TAPEDEV_MAX_DEVICES) {
-    err = -ENOSPC;
-    mutex_unlock(&tapedev_devices_lock);
+  // Allocate the free device index.
+  if ((err = tapedev_alloc_idx(dev)))
     goto out_slot;
-  }
-  tapedev_devices[i] = dev;
-  dev->idx = i;
-  mutex_unlock(&tapedev_devices_lock);
 
   // Enable PCI device.
   if ((err = pci_enable_device(pdev)))
@@ -150,7 +164,6 @@ static int tapedev_probe(struct pci_dev *pdev,
   if ((err = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(32))))
     goto out_mask;
 
-  // TODOP: What does this do?
   pci_set_master(pdev);
 
   if ((err = pci_request_regions(pdev, TAPEDEV_NAME)))
@@ -168,7 +181,7 @@ static int tapedev_probe(struct pci_dev *pdev,
     goto out_irq;
 
   // Turn on the device and wait for INIT_DONE.
-  if ((err = tapedev_enable_hw(dev)))
+  if ((err = tapedev_enable_device(dev)))
     goto out_enable_hw;
 
   // Initialize each section.
@@ -181,13 +194,11 @@ static int tapedev_probe(struct pci_dev *pdev,
     }
   }
 
-  // TODOP: Change to DEBUG;
   dev_info(&pdev->dev, "tapedev%d ready, %u sections\n", dev->idx,
            dev->section_count);
   return 0;
 
 out_sections:
-  // TODOP: Is that needed?
   // Mask all incoming interrupts for them not to come when cleaning up.
   TDEV_IOW(dev, TAPEDEV_IRQ_MASK_ADDR, ~0u);
   TDEV_IOW(dev, TAPEDEV_ENABLE_ADDR, 0);
@@ -211,12 +222,12 @@ out_alloc:
 }
 
 static void tapedev_remove(struct pci_dev *pdev) {
-  DEBUG("tapedev_remove\n");
   // Strongly inspired by `adlerdev_remove`.
+  DEBUG("tapedev_remove\n");
   struct tapedev_device *dev = pci_get_drvdata(pdev);
   int i;
 
-  // Eject all tapes.
+  // Eject all tapes to ensure no desynchronization on `rmmod`/`insmod` cycles.
   for (i = 0; i < dev->section_count; i++) {
     struct tapedev_section *sec = &dev->sections[i];
     if (sec->current_tape != 0) {
@@ -239,9 +250,7 @@ static void tapedev_remove(struct pci_dev *pdev) {
   pci_disable_device(pdev);
 
   // Free the index.
-  mutex_lock(&tapedev_devices_lock);
-  tapedev_devices[dev->idx] = 0;
-  mutex_unlock(&tapedev_devices_lock);
+  tapedev_free_idx(dev);
 
   kfree(dev);
 }

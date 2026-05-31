@@ -22,8 +22,7 @@ void tapedev_fill_pgtable_from_sg(struct tapedev_section *sec, int *sg_idx,
 
   int pgt_idx = 0;
 
-  // TODOP: Look at other implementations of this scatter_gathers and link them
-  // here. Until we have bytes to consume and free space in the pg_table.
+  // Until we have bytes to consume and free space in the pg_table.
   while (target_bytes > 0 && pgt_idx < TAPEDEV_BUF_PGTABLE_ENTRIES) {
     struct scatterlist *sg = &sec->sgl[*sg_idx];
 
@@ -33,15 +32,14 @@ void tapedev_fill_pgtable_from_sg(struct tapedev_section *sec, int *sg_idx,
     // How much more bytes are left to consume in this segment.
     u32 seg_remaining = sg_dma_len(sg) - *sg_offset;
 
-    // Bytes we are going to consume. Min since there may not be enough bytes to
-    // consume in this segment.
+    // Bytes we are going to consume.
     u32 take = min(target_bytes, seg_remaining);
     u32 take_blocks = take / sec->block_size;
 
     u64 entry;
 
     // Sanity check.
-    WARN_ON(seg_addr & 0x1ff); // TODOP: Macro for 0x1ff.
+    WARN_ON(!IS_ALIGNED(seg_addr, TAPEDEV_BUFFER_ALIGNEMENT));
     WARN_ON(take % sec->block_size);
 
     entry = ((u64)(seg_addr >> 9) << 32) | (u64)take_blocks;
@@ -184,14 +182,12 @@ static int tapedev_fast_fwd(struct tapedev_section *sec, u32 block_count) {
   return tapedev_send_cmd(sec, TAPEDEV_CMD_FAST_FWD | (block_count << 8), 0);
 }
 
-int tapedev_read(struct tapedev_section *sec, u32 block_count,
-                        u32 offset) {
+int tapedev_read(struct tapedev_section *sec, u32 block_count, u32 offset) {
   u32 cmd = TAPEDEV_CMD_READ | (block_count << 8) | (offset << 23);
   return tapedev_send_cmd(sec, cmd, sec->pgtable_dma);
 }
 
-int tapedev_write(struct tapedev_section *sec, u32 block_count,
-                         u32 offset) {
+int tapedev_write(struct tapedev_section *sec, u32 block_count, u32 offset) {
   u32 cmd = TAPEDEV_CMD_WRITE | (block_count << 8) | (offset << 23);
   return tapedev_send_cmd(sec, cmd, sec->pgtable_dma);
 }
@@ -207,20 +203,16 @@ int tapedev_move_to(struct tapedev_section *sec, u32 tape, u64 pos) {
   // If needed, switch the tape.
   if (sec->current_tape != tape) {
     if (sec->current_tape != 0) {
-      // TODOP: Macro
-      err = tapedev_eject_tape(sec);
-      if (err)
+      if ((err = tapedev_eject_tape(sec)))
         goto fail;
       sec->current_tape = 0;
     }
 
-    err = tapedev_take_tape(sec, tape);
-    if (err)
+    if ((err = tapedev_take_tape(sec, tape)))
       goto fail;
 
     // Tape position may be from the previous eject. Rewind it.
-    err = tapedev_rewind(sec);
-    if (err)
+    if ((err = tapedev_rewind(sec)))
       goto fail;
 
     sec->current_tape = tape;
@@ -229,16 +221,14 @@ int tapedev_move_to(struct tapedev_section *sec, u32 tape, u64 pos) {
 
   // Head is to far. Rewind it.
   if (sec->current_pos > pos) {
-    err = tapedev_rewind(sec);
-    if (err)
+    if ((err = tapedev_rewind(sec)))
       goto fail;
     sec->current_pos = 0;
   }
 
   if (sec->current_pos < pos) {
     u64 diff = pos - sec->current_pos;
-    err = tapedev_fast_fwd(sec, diff);
-    if (err)
+    if ((err = tapedev_fast_fwd(sec, diff)))
       goto fail;
     sec->current_pos = pos;
   }

@@ -28,11 +28,13 @@
 #define TAPEDEV_NAME "tapedev"
 #define TAPEDEV_MAX_DEVICES 256
 #define TAPEDEV_MAX_SECTIONS 8
+#define TAPEDEV_BUFFER_ALIGNEMENT 512
 
 // =================== HARDWARE HANDLING ===================
 #define TDEV_IOR(TAPE_DEV, REG) ioread32(TAPE_DEV->bar + REG)
 #define TDEV_IOW(TAPE_DEV, REG, VAL) iowrite32(VAL, TAPE_DEV->bar + REG)
-/// Sections are stored under (id+1)*0x100 since HW starts numbering from 1.
+/// Sections are stored under (id+1)*0x100 since `tapedev` starts numbering
+/// from 1.
 #define TDEV_SECTION_OFFSET(SECT_ID, REG) ((SECT_ID + 1) * 0x100 + REG)
 #define TDEV_SECTION_IOR(TAPE_DEV, SECT_ID, REG)                               \
   TDEV_IOR(TAPE_DEV, TDEV_SECTION_OFFSET(SECT_ID, REG))
@@ -47,8 +49,7 @@
 struct tapedev_device; // FD
 
 /**
- * @brief Represents a single tapedev section.
- * Will be exported as `/dev/tapedevXsN`
+ * @brief Single tapedev section.
  */
 struct tapedev_section {
   /// Pointer to the tapedev_device this section belongs to.
@@ -93,6 +94,9 @@ struct tapedev_section {
   struct scatterlist *sgl;
 };
 
+/**
+ * @brief The whole device.
+ */
 struct tapedev_device {
   /// PCI object handling this device.
   struct pci_dev *pdev;
@@ -113,19 +117,23 @@ struct tapedev_device {
   struct tapedev_section sections[TAPEDEV_MAX_SECTIONS];
 };
 
+// =================== SOME NEEDED EXPORTS ===================
+
 /// Major number assigned by `register_blkdev()`
 extern int tapedev_major;
 
 int tapedev_init_section(struct tapedev_device *dev, int i);
 void tapedev_free_section(struct tapedev_device *dev, int i);
 
-void tapedev_fill_pgtable_from_sg(struct tapedev_section *sec, int *sg_idx, u32 *sg_offset, u32 target_bytes);
+void tapedev_fill_pgtable_from_sg(struct tapedev_section *sec, int *sg_idx,
+                                  u32 *sg_offset, u32 target_bytes);
 int tapedev_read(struct tapedev_section *sec, u32 block_count, u32 offset);
 int tapedev_write(struct tapedev_section *sec, u32 block_count, u32 offset);
 int tapedev_move_to(struct tapedev_section *sec, u32 tape, u64 pos);
 int tapedev_eject_tape(struct tapedev_section *sec);
 
 extern const struct attribute_group *tapedev_disk_groups[];
-int tapedev_ioctl(struct block_device *bdev, blk_mode_t mode, unsigned int cmd, unsigned long arg);
+int tapedev_ioctl(struct block_device *bdev, blk_mode_t mode, unsigned int cmd,
+                  unsigned long arg);
 
 #endif
