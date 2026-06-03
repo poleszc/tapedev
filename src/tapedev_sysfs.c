@@ -1,11 +1,11 @@
 #include "tapedev_core.h"
-#include <asm-generic/errno.h>
 
 static int tapedev_ioctl_get_info(struct tapedev_section *sec,
 				  unsigned long arg)
 {
 	// Fill the struct and move to user space.
 	struct tapedev_sect_info info;
+
 	info.tapes = sec->tapes_count;
 	info.tape_type = sec->tape_type;
 	info.current_tape = sec->current_tape;
@@ -55,6 +55,7 @@ int tapedev_ioctl(struct block_device *bdev, blk_mode_t mode, unsigned int cmd,
 static struct tapedev_section *dev_to_section(struct device *dev)
 {
 	struct gendisk *disk = dev_to_disk(dev);
+
 	return disk->private_data;
 }
 
@@ -62,6 +63,7 @@ static ssize_t tape_type_show(struct device *dev, struct device_attribute *attr,
 			      char *buf)
 {
 	struct tapedev_section *sec = dev_to_section(dev);
+
 	return sysfs_emit(buf, "%u\n", sec->tape_type);
 }
 
@@ -69,6 +71,7 @@ static ssize_t tapes_show(struct device *dev, struct device_attribute *attr,
 			  char *buf)
 {
 	struct tapedev_section *sec = dev_to_section(dev);
+
 	return sysfs_emit(buf, "%u\n", sec->tapes_count);
 }
 
@@ -76,6 +79,7 @@ static ssize_t current_tape_show(struct device *dev,
 				 struct device_attribute *attr, char *buf)
 {
 	struct tapedev_section *sec = dev_to_section(dev);
+
 	return sysfs_emit(buf, "%u\n", sec->current_tape);
 }
 

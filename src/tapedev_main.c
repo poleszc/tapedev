@@ -114,6 +114,7 @@ static int tapedev_enable_device(struct tapedev_device *dev)
 static int tapedev_alloc_idx(struct tapedev_device *dev)
 {
 	int i, err = -ENOSPC;
+
 	mutex_lock(&tapedev_devices_lock);
 	for (i = 0; i < TAPEDEV_MAX_DEVICES; i++) {
 		if (!tapedev_devices[i]) {
@@ -139,8 +140,8 @@ static int tapedev_probe(struct pci_dev *pdev,
 {
 	// Strongly inspired by `adlerdev_probe`.
 	int err, i;
-
 	struct tapedev_device *dev = kzalloc(sizeof(*dev), GFP_KERNEL);
+
 	if (!dev) {
 		err = -ENOMEM;
 		goto out_alloc;
@@ -154,40 +155,48 @@ static int tapedev_probe(struct pci_dev *pdev,
 	init_waitqueue_head(&dev->init_wq);
 
 	// Allocate the free device index.
-	if ((err = tapedev_alloc_idx(dev)))
+	err = tapedev_alloc_idx(dev);
+	if (err)
 		goto out_slot;
 
 	// Enable PCI device.
-	if ((err = pci_enable_device(pdev)))
+	err = pci_enable_device(pdev);
+	if (err)
 		goto out_enable;
 
 	// Set the DMA mask.
-	if ((err = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(40))))
+	err = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(40));
+	if (err)
 		goto out_mask;
 
 	pci_set_master(pdev);
 
-	if ((err = pci_request_regions(pdev, TAPEDEV_NAME)))
+	err = pci_request_regions(pdev, TAPEDEV_NAME);
+	if (err)
 		goto out_regions;
 
 	// Map the BAR.
-	if (!(dev->bar = pci_iomap(pdev, 0, 0))) {
+	dev->bar = pci_iomap(pdev, 0, 0);
+	if (!dev->bar) {
 		err = -ENOMEM;
 		goto out_bar;
 	}
 
 	// Connect the IRQ line.
-	if ((err = request_irq(pdev->irq, tapedev_isr, IRQF_SHARED,
-			       TAPEDEV_NAME, dev)))
+	err = request_irq(pdev->irq, tapedev_isr, IRQF_SHARED, TAPEDEV_NAME,
+			  dev);
+	if (err)
 		goto out_irq;
 
 	// Turn on the device and wait for INIT_DONE.
-	if ((err = tapedev_enable_device(dev)))
+	err = tapedev_enable_device(dev);
+	if (err)
 		goto out_enable_hw;
 
 	// Initialize each section.
 	for (i = 0; i < dev->section_count; i++) {
-		if ((err = tapedev_init_section(dev, i))) {
+		err = tapedev_init_section(dev, i);
+		if (err) {
 			// Free all sections registered up to this point when an error occurs.
 			while (--i >= 0) {
 				tapedev_delete_section(dev, i);
@@ -227,7 +236,7 @@ out_alloc:
 static void tapedev_remove(struct pci_dev *pdev)
 {
 	// Strongly inspired by `adlerdev_remove`.
-	DEBUG("tapedev_remove\n");
+	DEBUG("Tapedev Remove\n");
 	struct tapedev_device *dev = pci_get_drvdata(pdev);
 	int i;
 
@@ -240,6 +249,7 @@ static void tapedev_remove(struct pci_dev *pdev)
 	// Eject all tapes to ensure no desynchronization on `rmmod`/`insmod` cycles.
 	for (i = 0; i < dev->section_count; i++) {
 		struct tapedev_section *sec = &dev->sections[i];
+
 		if (sec->current_tape != 0) {
 			tapedev_eject_tape(sec);
 			sec->current_tape = 0;
@@ -290,7 +300,8 @@ static int tapedev_init(void)
 	}
 
 	// Register PCI driver. Probe will be called automagically.
-	if ((err = pci_register_driver(&tapedev_pci_driver))) {
+	err = pci_register_driver(&tapedev_pci_driver);
+	if (err) {
 		unregister_blkdev(tapedev_major, TAPEDEV_NAME);
 		DEBUG("Unable to register PCI driver");
 		return err;
@@ -302,7 +313,6 @@ static void tapedev_exit(void)
 {
 	pci_unregister_driver(&tapedev_pci_driver);
 	unregister_blkdev(tapedev_major, TAPEDEV_NAME);
-	return;
 }
 
 module_init(tapedev_init);

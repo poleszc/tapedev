@@ -1,6 +1,4 @@
-#include "linux/compiler_attributes.h"
 #include "tapedev_core.h"
-#include <asm-generic/errno.h>
 
 /**
  * @brief FIll the page table with a fragment of `sg_table`.
@@ -195,12 +193,14 @@ static int tapedev_fast_fwd(struct tapedev_section *sec, u32 block_count)
 int tapedev_read(struct tapedev_section *sec, u32 block_count, u32 offset)
 {
 	u32 cmd = TAPEDEV_CMD_READ | (block_count << 8) | (offset << 23);
+
 	return tapedev_send_cmd(sec, cmd, sec->pgtable_dma);
 }
 
 int tapedev_write(struct tapedev_section *sec, u32 block_count, u32 offset)
 {
 	u32 cmd = TAPEDEV_CMD_WRITE | (block_count << 8) | (offset << 23);
+
 	return tapedev_send_cmd(sec, cmd, sec->pgtable_dma);
 }
 
@@ -227,16 +227,19 @@ int tapedev_move_to(struct tapedev_section *sec, u32 tape, u64 pos)
 	// If needed, switch the tape.
 	if (sec->current_tape != tape) {
 		if (sec->current_tape != 0) {
-			if ((err = tapedev_eject_tape(sec)))
+			err = tapedev_eject_tape(sec);
+			if (err)
 				goto fail;
 			sec->current_tape = 0;
 		}
 
-		if ((err = tapedev_take_tape(sec, tape)))
+		err = tapedev_take_tape(sec, tape);
+		if (err)
 			goto fail;
 
 		// Tape position may be from the previous eject. Rewind it.
-		if ((err = tapedev_rewind(sec)))
+		err = tapedev_rewind(sec);
+		if (err)
 			goto fail;
 
 		sec->current_tape = tape;
@@ -245,14 +248,17 @@ int tapedev_move_to(struct tapedev_section *sec, u32 tape, u64 pos)
 
 	// Head is to far. Rewind it.
 	if (sec->current_pos > pos) {
-		if ((err = tapedev_rewind(sec)))
+		err = tapedev_rewind(sec);
+		if (err)
 			goto fail;
 		sec->current_pos = 0;
 	}
 
 	if (sec->current_pos < pos) {
 		u64 diff = pos - sec->current_pos;
-		if ((err = tapedev_fast_fwd(sec, diff)))
+
+		err = tapedev_fast_fwd(sec, diff);
+		if (err)
 			goto fail;
 		sec->current_pos = pos;
 	}

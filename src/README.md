@@ -1,6 +1,6 @@
 # TapeDev Driver
 ## Struktura kodu
-- `tapedev_core.h` - definicje struktur `tapedev_device` i `tapedev_section`, niskopoziomowe 
+- `tapedev_core.h` - definicje struktur `tapedev_device` i `tapedev_section`, niskopoziomowe
 makra do handlowania hardware'u, publiczny interfejs
 - `tapedev_uapi.h` - definicje struktur i numerów wywołań IOCTL
 - `tapedev_main.c` - inicjalizacja PCI, rejestracja block layer'u, obsługa przerwań, włączanie urządzenia
@@ -11,7 +11,7 @@ makra do handlowania hardware'u, publiczny interfejs
 
 ## Decyzje projektowe i architektura
 ### Block Layer i Zero-Copy
-- Taśma jest urządzeniem sekwencyjnym przetwarzającym jedną instrukcję na raz, `queue_depth` jest ustawione na 1. 
+- Taśma jest urządzeniem sekwencyjnym przetwarzającym jedną instrukcję na raz, `queue_depth` jest ustawione na 1.
 - Flaga `BLK_MQ_F_BLOCKING` została włączona, bo funkcja `tapedev_queue_rq` jest synchroniczna – potrafi czekać na przerwanie oznaczające koniec I/O lub czekać na mutex.
 - Sterownik konwertuje wchodzący wektor danych na mapę SGL, którą przesyła do DMA. Fragmentuje listę SGL i zasila 4 KB tablicę stron.
 

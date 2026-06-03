@@ -12,7 +12,8 @@ static int tapedev_process_chunk(struct tapedev_section *sec, bool is_write,
 	      target_tape, pos_on_tape, chunk_blocks);
 
 	// Move the head on the correct tape.
-	if ((err = tapedev_move_to(sec, target_tape, pos_on_tape))) {
+	err = tapedev_move_to(sec, target_tape, pos_on_tape);
+	if (err) {
 		dev_err(&sec->device->pdev->dev,
 			"seek to tape=%u pos=%llu failed: %d\n", target_tape,
 			pos_on_tape, err);
@@ -23,11 +24,10 @@ static int tapedev_process_chunk(struct tapedev_section *sec, bool is_write,
 	tapedev_fill_pgtable_from_sg(sec, sg_idx, sg_offset,
 				     chunk_blocks * sec->block_size);
 
-	if (is_write) {
+	if (is_write)
 		err = tapedev_write(sec, chunk_blocks, 0);
-	} else {
+	else
 		err = tapedev_read(sec, chunk_blocks, 0);
-	}
 
 	if (err) {
 		dev_err(&sec->device->pdev->dev,
@@ -120,9 +120,10 @@ static blk_status_t tapedev_queue_rq(struct blk_mq_hw_ctx *hctx,
 		u32 chunk_blocks =
 			(u32)min_t(u64, remaining_blocks, blocks_to_boundry);
 
-		if ((err = tapedev_process_chunk(sec, is_write, target_tape,
-						 pos_on_tape, chunk_blocks,
-						 &sg_idx, &sg_offset))) {
+		err = tapedev_process_chunk(sec, is_write, target_tape,
+					    pos_on_tape, chunk_blocks, &sg_idx,
+					    &sg_offset);
+		if (err) {
 			status = BLK_STS_IOERR;
 			goto end;
 		}
@@ -190,8 +191,8 @@ static int tapedev_init_disk(struct tapedev_section *sec)
 	set_capacity(sec->gd, total_sectors);
 
 	// Add the disk.
-	if ((err = device_add_disk(&dev->pdev->dev, sec->gd,
-				   tapedev_disk_groups))) {
+	err = device_add_disk(&dev->pdev->dev, sec->gd, tapedev_disk_groups);
+	if (err) {
 		dev_err(&dev->pdev->dev, "device_add_disk failed: %d\n", err);
 		put_disk(sec->gd);
 		sec->gd = NULL;
@@ -200,8 +201,7 @@ static int tapedev_init_disk(struct tapedev_section *sec)
 
 	dev_info(
 		&dev->pdev->dev,
-		"section %d: %u tapes, type %u, %llu B per tape, /dev/%s (%llu "
-		"sectors)\n",
+		"section %d: %u tapes, type %u, %llu B per tape, /dev/%s (%llu sectors)\n",
 		sec->id, sec->tapes_count, sec->tape_type, sec->tape_size,
 		sec->gd->disk_name, total_sectors);
 	return 0;
@@ -247,6 +247,7 @@ int tapedev_init_section(struct tapedev_device *dev, int i)
 
 	// Ensure the tape is removed after `rmmod`
 	u32 actual = TDEV_SECTION_IOR(dev, i, TAPEDEV_SECT_TAPE_NO_ADDR);
+
 	if (actual != 0) {
 		dev_info(&dev->pdev->dev,
 			 "section %d: tape %u from prev session, ejecting\n", i,
@@ -270,15 +271,16 @@ int tapedev_init_section(struct tapedev_device *dev, int i)
 	sec->tag_set.cmd_size = 0;
 	sec->tag_set.flags = BLK_MQ_F_BLOCKING;
 
-	if ((err = blk_mq_alloc_tag_set(&sec->tag_set))) {
+	err = blk_mq_alloc_tag_set(&sec->tag_set);
+	if (err) {
 		dev_err(&dev->pdev->dev, "blk_mq_alloc_tag_set failed: %d\n",
 			err);
 		goto out_sgl;
 	}
 
-	if ((err = tapedev_init_disk(sec))) {
+	err = tapedev_init_disk(sec);
+	if (err)
 		goto out_tagset;
-	}
 
 	return 0;
 
