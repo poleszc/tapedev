@@ -37,10 +37,10 @@
 /// Sections are stored under (id+1)*0x100 since `tapedev` starts numbering
 /// from 1.
 #define TDEV_SECTION_OFFSET(SECT_ID, REG) (((SECT_ID) + 1) * 0x100 + REG)
-#define TDEV_SECTION_IOR(TAPE_DEV, SECT_ID, REG)                               \
-  TDEV_IOR(TAPE_DEV, TDEV_SECTION_OFFSET(SECT_ID, REG))
-#define TDEV_SECTION_IOW(TAPE_DEV, SECT_ID, REG, VAL)                          \
-  TDEV_IOW(TAPE_DEV, TDEV_SECTION_OFFSET(SECT_ID, REG), VAL)
+#define TDEV_SECTION_IOR(TAPE_DEV, SECT_ID, REG) \
+	TDEV_IOR(TAPE_DEV, TDEV_SECTION_OFFSET(SECT_ID, REG))
+#define TDEV_SECTION_IOW(TAPE_DEV, SECT_ID, REG, VAL) \
+	TDEV_IOW(TAPE_DEV, TDEV_SECTION_OFFSET(SECT_ID, REG), VAL)
 #define TDEV_SECTION_SIZE(TAPE_TYPE) ((32ULL) * BIT(TAPE_TYPE) * 8192u)
 
 // =================== DEVICE STUCTURES ===================
@@ -50,72 +50,72 @@ struct tapedev_device; // FD
  * @brief Single tapedev section.
  */
 struct tapedev_section {
-  /// Pointer to the tapedev_device this section belongs to.
-  struct tapedev_device *device;
-  /// 0...7, section N from `/dev/tapedevXsN`
-  int id;
+	/// Pointer to the tapedev_device this section belongs to.
+	struct tapedev_device *device;
+	/// 0...7, section N from `/dev/tapedevXsN`
+	int id;
 
-  // === Command synchronization ===
-  struct mutex cmd_mutex;
-  // Mutex for performing ioctl calls and waiting for all reads/writes to end
-  // before it.
-  struct mutex io_mutex;
-  wait_queue_head_t cmd_wq;
-  /// Set in the interrupt, zeroed before inserting a command
-  bool cmd_done;
-  /// SECT_STATUS_ADDR read in the interrupt.
-  u32 cmd_status;
+	// === Command synchronization ===
+	struct mutex cmd_mutex;
+	// Mutex for performing ioctl calls and waiting for all reads/writes to end
+	// before it.
+	struct mutex io_mutex;
+	wait_queue_head_t cmd_wq;
+	/// Set in the interrupt, zeroed before inserting a command
+	bool cmd_done;
+	/// SECT_STATUS_ADDR read in the interrupt.
+	u32 cmd_status;
 
-  // === Tape information ===
-  /// Tape type 0...4
-  u32 tape_type;
-  /// Number of tapes in this section.
-  u32 tapes_count;
-  /// The size of a single tape in bytes.
-  u64 tape_size;
-  /// I/O block size of the device
-  u32 block_size;
+	// === Tape information ===
+	/// Tape type 0...4
+	u32 tape_type;
+	/// Number of tapes in this section.
+	u32 tapes_count;
+	/// The size of a single tape in bytes.
+	u64 tape_size;
+	/// I/O block size of the device
+	u32 block_size;
 
-  // === Device state information ===
-  /// The tape we're currently on. 0 means no tape.
-  u32 current_tape;
-  /// The position within the tape (in blocks).
-  u64 current_pos;
-  /// Set after a command failed and the device state is undefined. Forces an
-  /// eject on the next `move_to`.
-  bool needs_recovery;
+	// === Device state information ===
+	/// The tape we're currently on. 0 means no tape.
+	u32 current_tape;
+	/// The position within the tape (in blocks).
+	u64 current_pos;
+	/// Set after a command failed and the device state is undefined. Forces an
+	/// eject on the next `move_to`.
+	bool needs_recovery;
 
-  // === DMA ===
-  void *pgtable;
-  dma_addr_t pgtable_dma;
+	// === DMA ===
+	void *pgtable;
+	dma_addr_t pgtable_dma;
 
-  // === Block Layer ===
-  struct gendisk *gd;
-  struct blk_mq_tag_set tag_set;
-  struct scatterlist *sgl;
+	// === Block Layer ===
+	struct gendisk *gd;
+	struct blk_mq_tag_set tag_set;
+	struct scatterlist *sgl;
 };
 
 /**
  * @brief The whole device.
  */
 struct tapedev_device {
-  /// PCI object handling this device.
-  struct pci_dev *pdev;
-  /// Index of this device. X in `/dev/tapedevX`
-  int idx;
-  /// Mapped BAR0
-  void __iomem *bar;
+	/// PCI object handling this device.
+	struct pci_dev *pdev;
+	/// Index of this device. X in `/dev/tapedevX`
+	int idx;
+	/// Mapped BAR0
+	void __iomem *bar;
 
-  /// For protecting the flags and states.
-  spinlock_t slock;
+	/// For protecting the flags and states.
+	spinlock_t slock;
 
-  /// Handshake - the device is done with init.
-  wait_queue_head_t init_wq;
-  bool init_done;
+	/// Handshake - the device is done with init.
+	wait_queue_head_t init_wq;
+	bool init_done;
 
-  /// Number of sections in the device.
-  u32 section_count;
-  struct tapedev_section sections[TAPEDEV_MAX_SECTIONS];
+	/// Number of sections in the device.
+	u32 section_count;
+	struct tapedev_section sections[TAPEDEV_MAX_SECTIONS];
 };
 
 // =================== SOME NEEDED EXPORTS ===================
@@ -128,7 +128,7 @@ void tapedev_delete_section(struct tapedev_device *dev, int i);
 void tapedev_free_section(struct tapedev_device *dev, int i);
 
 void tapedev_fill_pgtable_from_sg(struct tapedev_section *sec, int *sg_idx,
-                                  u32 *sg_offset, u32 target_bytes);
+				  u32 *sg_offset, u32 target_bytes);
 int tapedev_read(struct tapedev_section *sec, u32 block_count, u32 offset);
 int tapedev_write(struct tapedev_section *sec, u32 block_count, u32 offset);
 int tapedev_move_to(struct tapedev_section *sec, u32 tape, u64 pos);
@@ -136,6 +136,6 @@ int tapedev_eject_tape(struct tapedev_section *sec);
 
 extern const struct attribute_group *tapedev_disk_groups[];
 int tapedev_ioctl(struct block_device *bdev, blk_mode_t mode, unsigned int cmd,
-                  unsigned long arg);
+		  unsigned long arg);
 
 #endif

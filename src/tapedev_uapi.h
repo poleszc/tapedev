@@ -11,6 +11,6 @@ struct tapedev_sect_info {
 };
 
 #define TAPEDEV_IOCTL_EJECT_TAPE _IO('~', 1)
-#define TAPEDEV_IOCTL_GET_INFO   _IOR('~', 0, struct tapedev_sect_info)
+#define TAPEDEV_IOCTL_GET_INFO _IOR('~', 0, struct tapedev_sect_info)
 
 #endif
