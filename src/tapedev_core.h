@@ -35,7 +35,7 @@
 #define TDEV_IOW(TAPE_DEV, REG, VAL) iowrite32(VAL, TAPE_DEV->bar + REG)
 /// Sections are stored under (id+1)*0x100 since `tapedev` starts numbering
 /// from 1.
-#define TDEV_SECTION_OFFSET(SECT_ID, REG) ((SECT_ID + 1) * 0x100 + REG)
+#define TDEV_SECTION_OFFSET(SECT_ID, REG) (((SECT_ID) + 1) * 0x100 + REG)
 #define TDEV_SECTION_IOR(TAPE_DEV, SECT_ID, REG)                               \
   TDEV_IOR(TAPE_DEV, TDEV_SECTION_OFFSET(SECT_ID, REG))
 #define TDEV_SECTION_IOW(TAPE_DEV, SECT_ID, REG, VAL)                          \
@@ -83,6 +83,9 @@ struct tapedev_section {
   u32 current_tape;
   /// The position within the tape (in blocks).
   u64 current_pos;
+  /// Set after a command failed and the device state is undefined. Forces an
+  /// eject on the next `move_to`.
+  bool needs_recovery;
 
   // === DMA ===
   void *pgtable;
@@ -123,6 +126,7 @@ struct tapedev_device {
 extern int tapedev_major;
 
 int tapedev_init_section(struct tapedev_device *dev, int i);
+void tapedev_delete_section(struct tapedev_device *dev, int i);
 void tapedev_free_section(struct tapedev_device *dev, int i);
 
 void tapedev_fill_pgtable_from_sg(struct tapedev_section *sec, int *sg_idx,

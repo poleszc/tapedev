@@ -1,4 +1,5 @@
 #include "tapedev_core.h"
+#include <asm-generic/errno.h>
 
 static int tapedev_ioctl_get_info(struct tapedev_section *sec,
                                   unsigned long arg) {
@@ -20,17 +21,16 @@ static int tapedev_ioctl_eject_tape(struct tapedev_section *sec) {
   mutex_lock(&sec->io_mutex);
 
   err = tapedev_eject_tape(sec);
-  if (err == 0 || err == -ENOMEDIUM) {
-    sec->current_tape = 0;
-    sec->current_pos = 0;
-    mutex_unlock(&sec->io_mutex);
-    return 0;
-  }
-
   sec->current_tape = 0;
   sec->current_pos = 0;
+
+  // If the device errored, we have to force recovery on the next access.
+  sec->needs_recovery = !(err == 0 || err == -ENOMEDIUM);
+
   mutex_unlock(&sec->io_mutex);
-  return err;
+
+  // Nothing to eject is treated as success.
+  return (err == -ENOMEDIUM) ? 0 : err;
 }
 
 int tapedev_ioctl(struct block_device *bdev, blk_mode_t mode, unsigned int cmd,

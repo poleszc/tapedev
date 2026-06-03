@@ -36,7 +36,7 @@ static int tapedev_process_chunk(struct tapedev_section *sec, bool is_write,
 
     // Head state is unknown after fail. We force w fill EJECT, TAKE, REWIND
     // on the next request.
-    sec->current_tape = 0;
+    sec->needs_recovery = true;
   }
 
   return err;
@@ -83,7 +83,6 @@ static blk_status_t tapedev_queue_rq(struct blk_mq_hw_ctx *hctx,
   DEBUG("queue_rq sec=%d %s pos=%llu bytes=%u\n", sec->id,
         is_write ? "WRITE" : "READ", (u64)blk_rq_pos(rq), blk_rq_bytes(rq));
 
-  // TODOP: Is that needed?
   sg_init_table(sec->sgl, TAPEDEV_BUF_PGTABLE_ENTRIES);
 
   // Change the bio-vec's from request to scatterlist.
@@ -215,11 +214,11 @@ int tapedev_init_section(struct tapedev_device *dev, int i) {
   sec->cmd_done = false;
   sec->current_tape = 0;
   sec->current_pos = 0;
+  sec->needs_recovery = false;
 
   sec->tapes_count = TDEV_SECTION_IOR(dev, i, TAPEDEV_SECT_TAPES_ADDR);
   sec->tape_type = TDEV_SECTION_IOR(dev, i, TAPEDEV_SECT_TAPE_SIZE_ADDR);
   sec->tape_size = TDEV_SECTION_SIZE(sec->tape_type);
-  // TODOP: Make this configurable.
   sec->block_size = 4096;
   TDEV_SECTION_IOW(dev, i, TAPEDEV_SECT_TAPE_BLOCKSIZE_ADDR,
                    TAPEDEV_SECT_BLOCKSIZE_4096);
@@ -274,6 +273,8 @@ int tapedev_init_section(struct tapedev_device *dev, int i) {
   return 0;
 
 out_tagset:
+  mutex_destroy(&sec->io_mutex);
+  mutex_destroy(&sec->cmd_mutex);
   blk_mq_free_tag_set(&sec->tag_set);
 out_sgl:
   kfree(sec->sgl);
@@ -285,13 +286,23 @@ out_pgtable:
   return err;
 }
 
+// Detach the disk. This must be done when the device is still alive so
+// `del_gendisk` can perform all pending requests.
+void tapedev_delete_section(struct tapedev_device *dev, int i) {
+  struct tapedev_section *sec = &dev->sections[i];
+
+  if (sec->gd)
+    del_gendisk(sec->gd);
+}
+
+// Release all resources of the section. The disk must have already been
+// detached by `tapedev_delete_section` when calling this.
 void tapedev_free_section(struct tapedev_device *dev, int i) {
   struct tapedev_section *sec = &dev->sections[i];
 
   if (sec->gd) {
-    del_gendisk(sec->gd);
-    blk_mq_free_tag_set(&sec->tag_set);
     put_disk(sec->gd);
+    blk_mq_free_tag_set(&sec->tag_set);
     sec->gd = NULL;
   }
 

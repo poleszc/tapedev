@@ -1,4 +1,5 @@
 #include "tapedev_core.h"
+#include <asm-generic/errno.h>
 
 /**
  * @brief FIll the page table with a fragment of `sg_table`.
@@ -16,8 +17,6 @@
  */
 void tapedev_fill_pgtable_from_sg(struct tapedev_section *sec, int *sg_idx,
                                   u32 *sg_offset, u32 target_bytes) {
-  // DMA interprets it as little endian, so we ensure proper endianness here.
-  // TODOP: This may not be needed since we're on x86_64.
   __le64 *pgt = sec->pgtable;
 
   int pgt_idx = 0;
@@ -195,10 +194,21 @@ int tapedev_write(struct tapedev_section *sec, u32 block_count, u32 offset) {
 /**
  * @brief Move the head to (tape, pos)
  * On success, `sec->current_tape == tape && sec->curreny_tape == tape`;
- * On fail, `sec->current_tape = 0`;
+ * On fail, `sec->current_tape = 0` and `sec->needs_recovery == true`;
  */
 int tapedev_move_to(struct tapedev_section *sec, u32 tape, u64 pos) {
   int err;
+
+  // A previous command might have failed and the hardware may sill hold a tape
+  // at an unknown position. We force an eject.
+  if (sec->needs_recovery) {
+    err = tapedev_eject_tape(sec);
+    if (err && err != -ENOMEDIUM)
+      goto fail;
+    sec->current_tape = 0;
+    sec->current_pos = 0;
+    sec->needs_recovery = false;
+  }
 
   // If needed, switch the tape.
   if (sec->current_tape != tape) {
@@ -238,5 +248,6 @@ int tapedev_move_to(struct tapedev_section *sec, u32 tape, u64 pos) {
 fail:
   sec->current_tape = 0;
   sec->current_pos = 0;
+  sec->needs_recovery = true;
   return err;
 }

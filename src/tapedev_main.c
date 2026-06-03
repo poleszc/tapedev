@@ -161,7 +161,7 @@ static int tapedev_probe(struct pci_dev *pdev,
     goto out_enable;
 
   // Set the DMA mask.
-  if ((err = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(32))))
+  if ((err = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(40))))
     goto out_mask;
 
   pci_set_master(pdev);
@@ -188,8 +188,10 @@ static int tapedev_probe(struct pci_dev *pdev,
   for (i = 0; i < dev->section_count; i++) {
     if ((err = tapedev_init_section(dev, i))) {
       // Free all sections registered up to this point when an error occurs.
-      while (--i >= 0)
+      while (--i >= 0) {
+        tapedev_delete_section(dev, i);
         tapedev_free_section(dev, i);
+      }
       goto out_sections;
     }
   }
@@ -227,6 +229,12 @@ static void tapedev_remove(struct pci_dev *pdev) {
   struct tapedev_device *dev = pci_get_drvdata(pdev);
   int i;
 
+  // Detach the disks first, so `del_gendisk()` can perform all penging
+  // requests when the device is still on.
+  for (i = 0; i < dev->section_count; i++)
+    tapedev_delete_section(dev, i);
+
+  // No block IO can be performed anymore, since we've deleted the disks.
   // Eject all tapes to ensure no desynchronization on `rmmod`/`insmod` cycles.
   for (i = 0; i < dev->section_count; i++) {
     struct tapedev_section *sec = &dev->sections[i];
