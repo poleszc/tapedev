@@ -285,8 +285,6 @@ int tapedev_init_section(struct tapedev_device *dev, int i)
 	return 0;
 
 out_tagset:
-	mutex_destroy(&sec->io_mutex);
-	mutex_destroy(&sec->cmd_mutex);
 	blk_mq_free_tag_set(&sec->tag_set);
 out_sgl:
 	kfree(sec->sgl);
@@ -295,6 +293,8 @@ out_pgtable:
 	dma_free_coherent(&dev->pdev->dev, TAPEDEV_BUF_PGTABLE_SIZE,
 			  sec->pgtable, sec->pgtable_dma);
 	sec->pgtable = NULL;
+	mutex_destroy(&sec->io_mutex);
+	mutex_destroy(&sec->cmd_mutex);
 	return err;
 }
 
