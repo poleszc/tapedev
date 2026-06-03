@@ -28,3 +28,9 @@ Główna pętla wewnątrz `tapedev_queue_rq` oblicza na bieżąco, na jakiej fiz
 - Flaga `needs_recovery` ustawiana, po zfailowanym requeście. Stan urządzenia jest wtedy undefined i nie wiemy
 jaka karta i na jakiej pozycji siedzi karta w urządzeniu. Ta flaga powoduje za każdym razem pełny przepięcie w .
 handlowaniu kolejnego requesta (EJECT, TAKE_TAPE, REWIND)
+
+### Źródła
+- https://linux-kernel-labs.github.io/refs/heads/master/labs/block_device_drivers.html
+- adlerdev.c - z labów
+- https://achilles.tu.kielce.pl/portal/Members/eb68b762b9f54e23b7ad8c0787719cef/operating-systems-2/instructions/os2_laboratory_9.pdf
+- https://elixir.bootlin.com/linux/v6.18.5/source/drivers/block/ps3disk.c

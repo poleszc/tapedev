@@ -97,8 +97,7 @@ static blk_status_t tapedev_queue_rq(struct blk_mq_hw_ctx *hctx,
   // Map the sg_table to DMA.
   n_mapped = dma_map_sg(&dev->pdev->dev, sec->sgl, n_sg, dma_dir);
   if (!n_mapped) {
-    dev_err(&dev->pdev->dev,
-            "dma_map_sg failed\n"); // Unify the usage of those.
+    dev_err(&dev->pdev->dev, "dma_map_sg failed\n");
     status = BLK_STS_IOERR;
     goto end_no_unmap;
   }
@@ -165,7 +164,6 @@ static int tapedev_init_disk(struct tapedev_section *sec) {
   };
 
   // Initialize the gendisk
-  // https://linux-kernel-labs.github.io/refs/heads/master/labs/block_device_drivers.html
   sec->gd = blk_mq_alloc_disk(&sec->tag_set, &limits, sec);
   if (IS_ERR(sec->gd)) {
     err = PTR_ERR(sec->gd);

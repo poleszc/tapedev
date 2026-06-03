@@ -17,9 +17,10 @@
 #include "tapedev_uapi.h"
 
 // =================== DEBUG ===================
-#define DEBUG_ON
+// #define DEBUG_ON
+
 #ifdef DEBUG_ON
-#define DEBUG(fmt, ...) printk(KERN_ALERT "[TAPEDEV]: " fmt, ##__VA_ARGS__)
+#define DEBUG(fmt, ...) printk(KERN_DEBUG "[TAPEDEV]: " fmt, ##__VA_ARGS__)
 #else
 #define DEBUG(fmt, ...)
 #endif
@@ -43,9 +44,6 @@
 #define TDEV_SECTION_SIZE(TAPE_TYPE) ((32ULL) * BIT(TAPE_TYPE) * 8192u)
 
 // =================== DEVICE STUCTURES ===================
-// pci_dev (PCI card) -> tapedev_device (out device) ->
-// tapedev_section[N] (single section in the device)
-
 struct tapedev_device; // FD
 
 /**

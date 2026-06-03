@@ -1,3 +1,4 @@
+#include "linux/compiler_attributes.h"
 #include "tapedev_core.h"
 #include <asm-generic/errno.h>
 
@@ -59,7 +60,7 @@ void tapedev_fill_pgtable_from_sg(struct tapedev_section *sec, int *sg_idx,
 }
 
 // =================== COMMANDS ===================
-static const char *tapedev_status_name(u32 status) {
+__maybe_unused static const char *tapedev_status_name(u32 status) {
   switch (status) {
   case TAPEDEV_SECT_STATUS_IDLE:
     return "IDLE";

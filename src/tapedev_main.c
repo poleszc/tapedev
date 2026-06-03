@@ -1,10 +1,5 @@
 #include "tapedev_core.h"
 
-// Sources:
-// https://linux-kernel-labs.github.io/refs/heads/master/labs/block_device_drivers.html
-// adlerdev.c - from labs
-// https://achilles.tu.kielce.pl/portal/Members/eb68b762b9f54e23b7ad8c0787719cef/operating-systems-2/instructions/os2_laboratory_9.pdf
-// https://elixir.bootlin.com/linux/v6.18.5/source/drivers/block/ps3disk.c
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("tapedev device driver");
 MODULE_AUTHOR("poleszc");
@@ -38,7 +33,6 @@ static irqreturn_t tapedev_isr(int irg, void *opaque) {
   // Device has finished initing. Wake up someone waiting in
   // `tapedev_enable_device`.
   if (istatus & BIT(TAPEDEV_IRQ_INIT_DONE)) {
-    DEBUG("ISR Done\n");
     dev->init_done = true;
     wake_up(&dev->init_wq);
     handled |= BIT(TAPEDEV_IRQ_INIT_DONE);
@@ -46,7 +40,6 @@ static irqreturn_t tapedev_isr(int irg, void *opaque) {
 
   // Hardware error.
   if (istatus & BIT(TAPEDEV_IRQ_HW_ERROR)) {
-    DEBUG("ISR Error\n");
     dev_err(&dev->pdev->dev, "hardware error from tapedev\n");
     handled |= BIT(TAPEDEV_IRQ_HW_ERROR);
   }

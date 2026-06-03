@@ -71,6 +71,7 @@ static ssize_t current_tape_show(struct device *dev,
   struct tapedev_section *sec = dev_to_section(dev);
   return sysfs_emit(buf, "%u\n", sec->current_tape);
 }
+
 static DEVICE_ATTR_RO(tape_type);
 static DEVICE_ATTR_RO(tapes);
 static DEVICE_ATTR_RO(current_tape);
