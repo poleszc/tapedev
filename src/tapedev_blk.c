@@ -1,5 +1,3 @@
-#include "linux/blk-mq.h"
-#include "linux/blkdev.h"
 #include "tapedev_core.h"
 
 static int tapedev_process_chunk(struct tapedev_section *sec, bool is_write,
